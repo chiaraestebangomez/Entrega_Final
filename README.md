@@ -19,7 +19,7 @@ La implementación sigue los artefactos de la wiki del proyecto (historias de us
 ## Arranque con Docker
 
 ```bash
-git clone [suspicious link removed]
+git clone https://github.com/chiaraestebangomez/Entrega_Final
 cd Entrega_Final
 cp .env.example .env
 docker compose up --build -d
