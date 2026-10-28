@@ -16,7 +16,32 @@ La implementación sigue los artefactos de la wiki del proyecto (historias de us
 
 ---
 
-## Arranque con Docker
+
+## Interfaz
+La SPA se sirve desde la misma API y se empaqueta con `go:embed` desde `internal/web/static`. No requiere npm, CDN ni un servidor adicional.
+
+* Resumen, viajes y detalle de itinerario, viajes compartidos, correo, agencia, notificaciones y análisis.
+* Iniciar sesión/registro con token de acceso y actualización automática.
+* Creación y edición de reservas, compartición por email, consultas a agencias, ingesta simulada de emails y publicación social simulada.
+* Navegación por hash: `#/dashboard`, `#/trips`, `#/mail`, `#/agency`, `#/analytics`, entre otras.
+
+---
+
+
+**Requisitos:** Go 1.22, PostgreSQL 16 y Redis 7.
+
+```bash
+cp .env.example .env
+set -a && source .env && set +a
+go mod download
+go run ./cmd/api
+```
+
+Las migraciones y semillas se aplican automáticamente al iniciar. Las claves RSA se generan en `keys/` si no existen.
+
+---
+
+## Iniciar el sistema
 
 ```bash
 git clone https://github.com/chiaraestebangomez/Entrega_Final
@@ -34,46 +59,6 @@ Abra `http://localhost:8080` para usar la aplicación.
 **Prueba de humo de extremo a extremo:**
 ```bash
 make test-e2e
-```
-
----
-
-## Interfaz
-La SPA se sirve desde la misma API y se empaqueta con `go:embed` desde `internal/web/static`. No requiere npm, CDN ni un servidor adicional.
-
-* Resumen, viajes y detalle de itinerario, viajes compartidos, correo, agencia, notificaciones y análisis.
-* Iniciar sesión/registro con token de acceso y actualización automática.
-* Creación y edición de reservas, compartición por email, consultas a agencias, ingesta simulada de emails y publicación social simulada.
-* Navegación por hash: `#/dashboard`, `#/trips`, `#/mail`, `#/agency`, `#/analytics`, entre otras.
-
----
-
-## Desarrollo local
-
-```bash
-git clone [suspicious link removed]
-cd Entrega_Final
-```
-
-**Requisitos:** Go 1.22, PostgreSQL 16 y Redis 7.
-
-```bash
-cp .env.example .env
-set -a && source .env && set +a
-go mod download
-go run ./cmd/api
-```
-
-Las migraciones y semillas se aplican automáticamente al iniciar. Las claves RSA se generan en `keys/` si no existen.
-
----
-
-## Pruebas y calidad
-
-```bash
-go test ./...
-go vet ./...
-gofmt -l .
 ```
 
 **Cobertura funcional incluida:** analizador de correos, filtros, agrupación por destino/fechas, autenticación con rotación de refresco, JWT, cifrado AES-GCM, proveedores simulados, analítica anonimizada, social, compartición y entrega de la SPA con sus activos.
