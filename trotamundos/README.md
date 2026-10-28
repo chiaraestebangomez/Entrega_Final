@@ -1,6 +1,6 @@
 # Trotamundos
 
-Backend de la plataforma **Trotamundos**: los viajeros centralizan reservas dispersas en emails y proveedores, reciben un itinerario agrupado automáticamente, comparten viajes de solo lectura y acceden a recomendaciones de una agencia favorita. Los analistas consultan métricas anonimizadas en una base separada de lectura.
+Plataforma **Trotamundos** con backend Go y frontend web: los viajeros centralizan reservas dispersas en emails y proveedores, reciben un itinerario agrupado automáticamente, comparten viajes de solo lectura y acceden a recomendaciones de una agencia favorita. Los analistas consultan métricas anonimizadas en una base separada de lectura.
 
 La implementación sigue los artefactos de la wiki del proyecto (historias de usuario, QAS, restricciones, ADRs e iteraciones del método ADD 3.0).
 
@@ -12,6 +12,7 @@ La implementación sigue los artefactos de la wiki del proyecto (historias de us
 - JWT RS256 (15 min) + refresh opaco (30 días).
 - Sin dependencias de framework HTTP: `net/http` con patrones de Go 1.22.
 - Adapters de proveedores y correo **mock**; no se realizan llamadas externas.
+- Frontend SPA embebido en el binario Go: HTML, CSS y JavaScript sin build ni dependencias externas.
 - Docker multi-stage + Docker Compose.
 
 ## Arranque con Docker
@@ -20,6 +21,8 @@ La implementación sigue los artefactos de la wiki del proyecto (historias de us
 docker compose up --build -d
 curl http://localhost:8080/readyz
 ```
+
+Abrir <http://localhost:8080> para usar la aplicación.
 
 Usuario analista sembrado por defecto:
 
@@ -32,6 +35,15 @@ Smoke test de extremo a extremo:
 ```bash
 make smoke
 ```
+
+## Frontend
+
+La SPA se sirve desde la misma API y se empaqueta con `go:embed` desde `internal/web/static`. No requiere npm, CDN ni un servidor adicional.
+
+- Resumen, viajes y detalle de itinerario, viajes compartidos, correo, agencia, notificaciones y analítica.
+- Login/registro con access token y refresh automático.
+- Creación y edición de reservas, compartición por email, consultas a agencias, ingesta mock de emails y publicación social simulada.
+- Navegación por hash: `#/dashboard`, `#/trips`, `#/mail`, `#/agency`, `#/analytics`, entre otras.
 
 ## Desarrollo local
 
@@ -54,7 +66,7 @@ go vet ./...
 gofmt -l .
 ```
 
-Cobertura funcional incluida: parser de correos, filtros, agrupación por destino/fechas, auth con rotación de refresh, JWT, cifrado AES-GCM, proveedores mock, analítica anonimizada, social y compartición.
+Cobertura funcional incluida: parser de correos, filtros, agrupación por destino/fechas, auth con rotación de refresh, JWT, cifrado AES-GCM, proveedores mock, analítica anonimizada, social, compartición y entrega de la SPA con sus assets.
 
 ## Arquitectura
 
@@ -71,6 +83,7 @@ internal/
   agencies               agencia favorita, recomendaciones y consultas
   sharing                compartición de viajes por email
   social                 vista previa y publicación mock en redes
+  web                    SPA embebida, estilos, JavaScript y assets
   platform/              pgx, redis, JWT, cifrado, breaker, geo, httpx
 ```
 
@@ -116,6 +129,11 @@ Decisiones relevantes:
 ## API
 
 Contratos: [`api/openapi.yaml`](api/openapi.yaml) y [`api/asyncapi.yaml`](api/asyncapi.yaml).
+
+### Frontend
+
+- `GET /` sirve la SPA.
+- `GET /assets/...` sirve estilos, scripts e iconos embebidos.
 
 ### Autenticación
 
@@ -171,6 +189,6 @@ Los emails se procesan por polling cada `INGESTION_POLL_INTERVAL`; se puede forz
 ## Limitaciones conocidas
 
 - Solo hay adapters mock; no hay OAuth real de Gmail/Outlook ni APIs de aerolíneas/hoteles.
-- No hay frontend; la compartición social devuelve una publicación simulada.
+- La compartición social devuelve una publicación simulada.
 - El sharding está modelado y es configurable, pero la selección de pool por usuario aún no se aplica en los repositorios (un shard por defecto).
 - La analítica usa la misma base por defecto; para separar OLTP/OLAP configurar `OLAP_DATABASE_URL` con una réplica.

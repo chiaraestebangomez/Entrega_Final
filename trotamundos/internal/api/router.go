@@ -13,6 +13,7 @@ import (
 	"trotamundos/internal/providers"
 	"trotamundos/internal/sharing"
 	"trotamundos/internal/social"
+	"trotamundos/internal/web"
 )
 
 type Deps struct {
@@ -114,6 +115,9 @@ func NewRouter(d Deps) http.Handler {
 
 	mux.Handle("GET /analytics/summary", analyst(d.Analytics.Summary))
 	mux.Handle("GET /analytics/facts", analyst(d.Analytics.Facts))
+
+	mux.Handle("GET /assets/", web.Assets())
+	mux.HandleFunc("GET /", web.Index)
 
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		httpx.Error(w, http.StatusNotFound, "not_found", "endpoint no encontrado")

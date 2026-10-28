@@ -29,6 +29,13 @@ step "Health"
 curl -fsS "$BASE/readyz"
 echo
 
+step "Frontend"
+INDEX=$(curl -fsS "$BASE/")
+[[ "$INDEX" == *"/assets/js/app.js"* ]]
+[[ "$(curl -sS -o /dev/null -w '%{http_code}' "$BASE/assets/styles.css")" == "200" ]]
+[[ "$(curl -sS -o /dev/null -w '%{http_code}' "$BASE/assets/js/app.js")" == "200" ]]
+echo "SPA y assets disponibles"
+
 step "Registro de viajero"
 REG=$(api POST /auth/register "" "{\"email\":\"$TRAVELER\",\"full_name\":\"Smoke Traveler\",\"password\":\"$PASSWORD\"}")
 TOKEN=$(printf '%s' "$REG" | jget "['tokens']['access_token']")
