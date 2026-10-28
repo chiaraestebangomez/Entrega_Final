@@ -1,0 +1,113 @@
+asyncapi: 2.6.0
+info:
+  title: Trotamundos Events
+  version: 1.0.0
+  description: >
+    Eventos internos y de integración del backend Trotamundos. La entrega es
+    asíncrona mediante la tabla outbox `itinerary.ingestion_events`, procesada
+    por un worker con reintentos exponenciales y recuperación de eventos stale.
+    Los proveedores y el correo son mocks; los eventos documentan los contratos
+    previstos para integraciones reales.
+defaultContentType: application/json
+channels:
+  mail/inbound:
+    description: Correo entrante aceptado por webhook o escaneo IMAP mock.
+    subscribe:
+      operationId: receiveInboundMail
+      message:
+        $ref: "#/components/messages/InboundMail"
+  mail/processed:
+    description: Resultado del procesamiento de un correo por el worker de ingesta.
+    publish:
+      operationId: publishMailProcessed
+      message:
+        $ref: "#/components/messages/IngestionResult"
+  reservations/sync:
+    description: Solicitud de sincronización de una reserva con su proveedor.
+    publish:
+      operationId: publishReservationSync
+      message:
+        $ref: "#/components/messages/ReservationSync"
+  reservations/changed:
+    description: Cambios detectados al fusionar datos de email, proveedor o edición manual.
+    publish:
+      operationId: publishReservationChanged
+      message:
+        $ref: "#/components/messages/ReservationChanged"
+  notifications:
+    description: Notificaciones generadas para el viajero.
+    publish:
+      operationId: publishNotification
+      message:
+        $ref: "#/components/messages/Notification"
+components:
+  messages:
+    InboundMail:
+      name: InboundMail
+      contentType: application/json
+      payload:
+        type: object
+        required: [mailbox_id, from, subject, body]
+        properties:
+          mailbox_id: {type: string, format: uuid}
+          message_id: {type: string}
+          from: {type: string}
+          subject: {type: string}
+          body: {type: string}
+          received_at: {type: string, format: date-time}
+    IngestionResult:
+      name: IngestionResult
+      contentType: application/json
+      payload:
+        type: object
+        required: [event_id, user_id, status]
+        properties:
+          event_id: {type: string, format: uuid}
+          user_id: {type: string, format: uuid}
+          message_id: {type: string}
+          status: {type: string, enum: [processed, ignored, error]}
+          attempts: {type: integer}
+          last_error: {type: string}
+          processed_at: {type: string, format: date-time}
+    ReservationSync:
+      name: ReservationSync
+      contentType: application/json
+      payload:
+        type: object
+        required: [user_id, reservation_id, provider, locator]
+        properties:
+          user_id: {type: string, format: uuid}
+          reservation_id: {type: string, format: uuid}
+          provider: {type: string}
+          locator: {type: string}
+          requested_at: {type: string, format: date-time}
+    ReservationChanged:
+      name: ReservationChanged
+      contentType: application/json
+      payload:
+        type: object
+        required: [user_id, reservation_id, source, changed_fields]
+        properties:
+          user_id: {type: string, format: uuid}
+          reservation_id: {type: string, format: uuid}
+          source: {type: string, enum: [email, provider, manual]}
+          changed_fields:
+            type: array
+            items: {type: string}
+          previous: {type: object, additionalProperties: true}
+          current: {type: object, additionalProperties: true}
+          occurred_at: {type: string, format: date-time}
+    Notification:
+      name: Notification
+      contentType: application/json
+      payload:
+        type: object
+        required: [user_id, type, title]
+        properties:
+          user_id: {type: string, format: uuid}
+          type: {type: string}
+          title: {type: string}
+          body: {type: string}
+          resource_type: {type: string}
+          resource_id: {type: string}
+          created_at: {type: string, format: date-time}

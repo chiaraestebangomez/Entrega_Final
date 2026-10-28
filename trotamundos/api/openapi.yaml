@@ -1,0 +1,1221 @@
+openapi: 3.0.3
+info:
+  title: Trotamundos API
+  version: 1.0.0
+  description: >
+    API del backend Trotamundos. Autenticación JWT RS256; refresh tokens rotativos.
+    Los endpoints protegidos requieren `Authorization: Bearer <access_token>`.
+    Los controles mock requieren `X-Mock-Key`; el webhook de correo requiere `X-Webhook-Key`.
+servers:
+  - url: http://localhost:8080
+security:
+  - bearerAuth: []
+tags:
+  - name: Auth
+  - name: Trips
+  - name: Reservations
+  - name: Ingestion
+  - name: Agencies
+  - name: Sharing
+  - name: Social
+  - name: Analytics
+  - name: Mock
+paths:
+  /healthz:
+    get:
+      tags: [Auth]
+      security: []
+      summary: Liveness
+      responses:
+        "200": {description: OK}
+  /readyz:
+    get:
+      tags: [Auth]
+      security: []
+      summary: Readiness (PostgreSQL + Redis)
+      responses:
+        "200": {description: Ready}
+        "503": {description: Dependencia no disponible}
+  /auth/register:
+    post:
+      tags: [Auth]
+      security: []
+      summary: Registro de viajero
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [email, full_name, password]
+              properties:
+                email: {type: string, format: email}
+                full_name: {type: string, minLength: 2}
+                password: {type: string, minLength: 8, maxLength: 72}
+      responses:
+        "201":
+          description: Usuario y tokens
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/AuthResponse"}
+        "400": {$ref: "#/components/responses/BadRequest"}
+        "409": {$ref: "#/components/responses/Conflict"}
+  /auth/login:
+    post:
+      tags: [Auth]
+      security: []
+      summary: Login
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [email, password]
+              properties:
+                email: {type: string, format: email}
+                password: {type: string}
+      responses:
+        "200":
+          description: Usuario y tokens
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/AuthResponse"}
+        "401": {$ref: "#/components/responses/Unauthorized"}
+  /auth/refresh:
+    post:
+      tags: [Auth]
+      security: []
+      summary: Rotar refresh token
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [refresh_token]
+              properties:
+                refresh_token: {type: string}
+      responses:
+        "200":
+          description: Nuevo par de tokens
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/AuthResponse"}
+        "401": {$ref: "#/components/responses/Unauthorized"}
+  /auth/logout:
+    post:
+      tags: [Auth]
+      security: []
+      summary: Revocar refresh token
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                refresh_token: {type: string}
+      responses:
+        "204": {description: Revocado}
+  /auth/me:
+    get:
+      tags: [Auth]
+      summary: Usuario autenticado
+      responses:
+        "200":
+          description: Usuario
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/User"}
+        "401": {$ref: "#/components/responses/Unauthorized"}
+  /trips:
+    get:
+      tags: [Trips]
+      summary: Listar viajes
+      parameters:
+        - name: archived
+          in: query
+          schema: {type: boolean, default: false}
+      responses:
+        "200":
+          description: Viajes con reservas
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: array
+                    items: {$ref: "#/components/schemas/Trip"}
+  /trips/{id}:
+    get:
+      tags: [Trips]
+      summary: Obtener viaje
+      parameters: [{$ref: "#/components/parameters/TripId"}]
+      responses:
+        "200":
+          description: Viaje
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/Trip"}
+        "404": {$ref: "#/components/responses/NotFound"}
+    delete:
+      tags: [Trips]
+      summary: Eliminar viaje archivado
+      parameters:
+        - $ref: "#/components/parameters/TripId"
+        - name: confirm
+          in: query
+          required: true
+          schema: {type: boolean}
+      responses:
+        "204": {description: Eliminado}
+        "400": {$ref: "#/components/responses/BadRequest"}
+  /trips/{id}/reservations:
+    post:
+      tags: [Reservations]
+      summary: Crear reserva asociada a un viaje
+      parameters: [{$ref: "#/components/parameters/TripId"}]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: "#/components/schemas/ReservationInput"}
+      responses:
+        "201":
+          description: Reserva
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/Reservation"}
+  /trips/{id}/context-location:
+    post:
+      tags: [Trips]
+      summary: Contexto de ubicación con consentimiento
+      parameters: [{$ref: "#/components/parameters/TripId"}]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [consent, latitude, longitude]
+              properties:
+                consent: {type: boolean}
+                latitude: {type: number, format: double}
+                longitude: {type: number, format: double}
+                accuracy_m: {type: number}
+      responses:
+        "200": {description: Contexto calculado}
+        "400": {$ref: "#/components/responses/BadRequest"}
+  /reservations:
+    post:
+      tags: [Reservations]
+      summary: Crear reserva (agrupa o crea viaje automáticamente)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: "#/components/schemas/ReservationInput"}
+      responses:
+        "201":
+          description: Reserva
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/Reservation"}
+  /reservations/{id}:
+    parameters: [{$ref: "#/components/parameters/ReservationId"}]
+    get:
+      tags: [Reservations]
+      summary: Obtener reserva con historial
+      responses:
+        "200":
+          description: Reserva
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/Reservation"}
+        "404": {$ref: "#/components/responses/NotFound"}
+    patch:
+      tags: [Reservations]
+      summary: Actualizar reserva
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: "#/components/schemas/ReservationInput"}
+      responses:
+        "200":
+          description: Reserva actualizada
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/Reservation"}
+    delete:
+      tags: [Reservations]
+      summary: Eliminar reserva
+      parameters:
+        - name: confirm
+          in: query
+          required: true
+          schema: {type: boolean}
+      responses:
+        "204": {description: Eliminada}
+        "400": {$ref: "#/components/responses/BadRequest"}
+  /reservations/{id}/sync:
+    post:
+      tags: [Reservations]
+      summary: Sincronizar con proveedor
+      parameters: [{$ref: "#/components/parameters/ReservationId"}]
+      responses:
+        "200":
+          description: Reserva sincronizada
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/Reservation"}
+        "503": {description: Proveedor no disponible}
+  /reservations/{id}/changes:
+    get:
+      tags: [Reservations]
+      summary: Historial de cambios
+      parameters: [{$ref: "#/components/parameters/ReservationId"}]
+      responses:
+        "200":
+          description: Cambios
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: array
+                    items: {$ref: "#/components/schemas/ReservationChange"}
+  /reservations/{id}/agency-request:
+    post:
+      tags: [Agencies]
+      summary: Consultar a la agencia favorita por una reserva
+      parameters: [{$ref: "#/components/parameters/ReservationId"}]
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                message: {type: string, maxLength: 2000}
+      responses:
+        "202": {description: Consulta creada}
+        "404": {$ref: "#/components/responses/NotFound"}
+  /notifications:
+    get:
+      tags: [Trips]
+      summary: Listar notificaciones
+      parameters:
+        - name: limit
+          in: query
+          schema: {type: integer, default: 50}
+      responses:
+        "200":
+          description: Notificaciones
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: array
+                    items: {$ref: "#/components/schemas/Notification"}
+  /notifications/{id}/read:
+    post:
+      tags: [Trips]
+      summary: Marcar notificación leída
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: {type: string, format: uuid}
+      responses:
+        "204": {description: Leída}
+  /mail/accounts:
+    get:
+      tags: [Ingestion]
+      summary: Listar cuentas de correo vinculadas
+      responses:
+        "200":
+          description: Cuentas
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: array
+                    items: {$ref: "#/components/schemas/MailAccount"}
+    post:
+      tags: [Ingestion]
+      summary: Vincular cuenta de correo (solo mail.read)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [provider, email, access_token]
+              properties:
+                provider: {type: string}
+                email: {type: string, format: email}
+                access_token: {type: string}
+                scopes:
+                  type: array
+                  items: {type: string, enum: [mail.read, mail.readonly]}
+      responses:
+        "201":
+          description: Cuenta vinculada
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/MailAccount"}
+        "409": {$ref: "#/components/responses/Conflict"}
+  /mail/accounts/{id}:
+    delete:
+      tags: [Ingestion]
+      summary: Revocar cuenta de correo
+      parameters: [{$ref: "#/components/parameters/Id"}]
+      responses:
+        "204": {description: Revocada}
+  /mail/accounts/{id}/scan:
+    post:
+      tags: [Ingestion]
+      summary: Forzar escaneo de la cuenta
+      parameters: [{$ref: "#/components/parameters/Id"}]
+      responses:
+        "202":
+          description: Eventos encolados
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  events_created: {type: integer}
+  /mail/events:
+    get:
+      tags: [Ingestion]
+      summary: Estado de eventos de ingesta
+      parameters:
+        - name: limit
+          in: query
+          schema: {type: integer, default: 50}
+      responses:
+        "200":
+          description: Eventos
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: array
+                    items: {$ref: "#/components/schemas/IngestionEvent"}
+  /mail/whitelist:
+    get:
+      tags: [Ingestion]
+      summary: Listar remitentes permitidos
+      responses:
+        "200":
+          description: Whitelist
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: array
+                    items: {$ref: "#/components/schemas/WhitelistEntry"}
+    post:
+      tags: [Ingestion]
+      summary: Agregar remitente permitido
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [pattern]
+              properties:
+                pattern: {type: string, example: "*@aerolineas.com"}
+      responses:
+        "201": {description: Agregado}
+  /mail/whitelist/{id}:
+    delete:
+      tags: [Ingestion]
+      summary: Quitar remitente permitido
+      parameters: [{$ref: "#/components/parameters/Id"}]
+      responses:
+        "204": {description: Eliminado}
+  /mail/filters:
+    get:
+      tags: [Ingestion]
+      summary: Listar filtros
+      responses:
+        "200":
+          description: Filtros
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: array
+                    items: {$ref: "#/components/schemas/MailFilter"}
+    post:
+      tags: [Ingestion]
+      summary: Crear filtro
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: "#/components/schemas/MailFilter"}
+      responses:
+        "201": {description: Creado}
+  /mail/filters/{id}:
+    patch:
+      tags: [Ingestion]
+      summary: Actualizar filtro
+      parameters: [{$ref: "#/components/parameters/Id"}]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: "#/components/schemas/MailFilter"}
+      responses:
+        "200": {description: Actualizado}
+    delete:
+      tags: [Ingestion]
+      summary: Eliminar filtro
+      parameters: [{$ref: "#/components/parameters/Id"}]
+      responses:
+        "204": {description: Eliminado}
+  /webhooks/mail:
+    post:
+      tags: [Ingestion]
+      security: []
+      summary: Webhook de correo entrante
+      parameters:
+        - name: X-Webhook-Key
+          in: header
+          required: true
+          schema: {type: string}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [mailbox_id, from, subject, body]
+              properties:
+                mailbox_id: {type: string, format: uuid}
+                message_id: {type: string}
+                from: {type: string}
+                subject: {type: string}
+                body: {type: string}
+                received_at: {type: string, format: date-time}
+      responses:
+        "200":
+          description: Evento aceptado
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  event_id: {type: string, format: uuid}
+                  status: {type: string}
+        "401": {$ref: "#/components/responses/Unauthorized"}
+  /agencies:
+    get:
+      tags: [Agencies]
+      summary: Catálogo de agencias
+      responses:
+        "200":
+          description: Agencias
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: array
+                    items: {$ref: "#/components/schemas/Agency"}
+  /agencies/favorite:
+    get:
+      tags: [Agencies]
+      summary: Agencia favorita
+      responses:
+        "200":
+          description: Favorita (puede ser null)
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  favorite:
+                    nullable: true
+                    allOf: [{$ref: "#/components/schemas/FavoriteAgency"}]
+    put:
+      tags: [Agencies]
+      summary: Elegir agencia favorita
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [agency_id]
+              properties:
+                agency_id: {type: string, format: uuid}
+      responses:
+        "200":
+          description: Favorita
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/FavoriteAgency"}
+        "404": {$ref: "#/components/responses/NotFound"}
+    delete:
+      tags: [Agencies]
+      summary: Quitar agencia favorita
+      parameters:
+        - name: confirm
+          in: query
+          required: true
+          schema: {type: boolean}
+      responses:
+        "204": {description: Eliminada}
+  /recommendations:
+    get:
+      tags: [Agencies]
+      summary: Recomendaciones de la agencia favorita
+      responses:
+        "200":
+          description: Recomendaciones
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: array
+                    items: {$ref: "#/components/schemas/Recommendation"}
+  /recommendations/{id}/discard:
+    post:
+      tags: [Agencies]
+      summary: Descartar recomendación
+      parameters: [{$ref: "#/components/parameters/Id"}]
+      responses:
+        "204": {description: Descartada}
+        "403": {description: No pertenece a la agencia favorita}
+  /recommendations/{id}/inquire:
+    post:
+      tags: [Agencies]
+      summary: Consultar recomendación
+      parameters: [{$ref: "#/components/parameters/Id"}]
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                message: {type: string, maxLength: 2000}
+      responses:
+        "202":
+          description: Consulta creada
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/AgencyRequest"}
+  /agency-requests:
+    get:
+      tags: [Agencies]
+      summary: Consultas a agencias
+      responses:
+        "200":
+          description: Consultas
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: array
+                    items: {$ref: "#/components/schemas/AgencyRequest"}
+  /agency-requests/{id}:
+    get:
+      tags: [Agencies]
+      summary: Detalle de consulta
+      parameters: [{$ref: "#/components/parameters/Id"}]
+      responses:
+        "200":
+          description: Consulta
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/AgencyRequest"}
+  /agency-requests/{id}/close:
+    post:
+      tags: [Agencies]
+      summary: Cerrar consulta
+      parameters: [{$ref: "#/components/parameters/Id"}]
+      responses:
+        "204": {description: Cerrada}
+  /trips/{id}/shares:
+    get:
+      tags: [Sharing]
+      summary: Ver con quién se compartió el viaje
+      parameters: [{$ref: "#/components/parameters/TripId"}]
+      responses:
+        "200":
+          description: Comparticiones
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: array
+                    items: {$ref: "#/components/schemas/TripShare"}
+    post:
+      tags: [Sharing]
+      summary: Compartir viaje por email (solo lectura)
+      parameters: [{$ref: "#/components/parameters/TripId"}]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [guest_email]
+              properties:
+                guest_email: {type: string, format: email}
+      responses:
+        "201":
+          description: Compartición creada
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/TripShare"}
+  /shares/{id}:
+    delete:
+      tags: [Sharing]
+      summary: Revocar compartición
+      parameters: [{$ref: "#/components/parameters/Id"}]
+      responses:
+        "204": {description: Revocada}
+  /shared-with-me:
+    get:
+      tags: [Sharing]
+      summary: Viajes compartidos con el usuario autenticado
+      responses:
+        "200":
+          description: Viajes compartidos
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: array
+                    items: {$ref: "#/components/schemas/SharedTrip"}
+  /shared/{id}:
+    get:
+      tags: [Sharing]
+      summary: Ver itinerario compartido (solo lectura)
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: {type: string, format: uuid}
+      responses:
+        "200":
+          description: Viaje compartido
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/SharedTrip"}
+        "404": {$ref: "#/components/responses/NotFound"}
+  /social/networks:
+    get:
+      tags: [Social]
+      security: []
+      summary: Redes sociales soportadas
+      responses:
+        "200": {description: Mapa red → nombre}
+  /trips/{id}/social/preview:
+    post:
+      tags: [Social]
+      summary: Vista previa del resumen social
+      parameters: [{$ref: "#/components/parameters/TripId"}]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [network]
+              properties:
+                network: {type: string, example: x}
+      responses:
+        "200":
+          description: Vista previa sin PII
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/SocialPreview"}
+  /trips/{id}/social/share:
+    post:
+      tags: [Social]
+      summary: Publicar resumen mock en red social
+      parameters: [{$ref: "#/components/parameters/TripId"}]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [network]
+              properties:
+                network: {type: string}
+      responses:
+        "201":
+          description: Publicación mock
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/SocialPost"}
+  /analytics/summary:
+    get:
+      tags: [Analytics]
+      summary: Resumen agregado anonimizado (rol analyst/admin)
+      parameters:
+        - $ref: "#/components/parameters/From"
+        - $ref: "#/components/parameters/To"
+      responses:
+        "200":
+          description: Resumen
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/AnalyticsSummary"}
+        "403": {description: Rol insuficiente}
+  /analytics/facts:
+    get:
+      tags: [Analytics]
+      summary: Hechos anonimizados (rol analyst/admin)
+      parameters:
+        - $ref: "#/components/parameters/From"
+        - $ref: "#/components/parameters/To"
+      responses:
+        "200":
+          description: Hechos
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: array
+                    items: {$ref: "#/components/schemas/AnalyticsFact"}
+  /mock/mail/{email}/messages:
+    post:
+      tags: [Mock]
+      summary: Agregar email a la bandeja mock
+      parameters:
+        - name: email
+          in: path
+          required: true
+          schema: {type: string, format: email}
+        - $ref: "#/components/parameters/MockKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [from, subject, body]
+              properties:
+                from: {type: string}
+                subject: {type: string}
+                body: {type: string}
+                received_at: {type: string, format: date-time}
+      responses:
+        "201": {description: Encolado}
+  /mock/providers/{provider}/reservations/{locator}:
+    put:
+      tags: [Mock]
+      summary: Crear o actualizar snapshot de proveedor
+      parameters:
+        - name: provider
+          in: path
+          required: true
+          schema: {type: string}
+        - name: locator
+          in: path
+          required: true
+          schema: {type: string}
+        - $ref: "#/components/parameters/MockKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: "#/components/schemas/ProviderSnapshot"}
+      responses:
+        "200": {description: Snapshot guardado}
+    delete:
+      tags: [Mock]
+      summary: Cancelar reserva mock
+      parameters:
+        - name: provider
+          in: path
+          required: true
+          schema: {type: string}
+        - name: locator
+          in: path
+          required: true
+          schema: {type: string}
+        - $ref: "#/components/parameters/MockKey"
+      responses:
+        "204": {description: Cancelada}
+  /mock/providers/{provider}/fail:
+    post:
+      tags: [Mock]
+      summary: Simular caída o recuperación del proveedor
+      parameters:
+        - name: provider
+          in: path
+          required: true
+          schema: {type: string}
+        - $ref: "#/components/parameters/MockKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                enabled: {type: boolean}
+      responses:
+        "200": {description: Estado actualizado}
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+  parameters:
+    Id:
+      name: id
+      in: path
+      required: true
+      schema: {type: string, format: uuid}
+    TripId:
+      name: id
+      in: path
+      required: true
+      schema: {type: string, format: uuid}
+    ReservationId:
+      name: id
+      in: path
+      required: true
+      schema: {type: string, format: uuid}
+    MockKey:
+      name: X-Mock-Key
+      in: header
+      required: true
+      schema: {type: string}
+    From:
+      name: from
+      in: query
+      schema: {type: string, format: date}
+    To:
+      name: to
+      in: query
+      schema: {type: string, format: date}
+  responses:
+    BadRequest:
+      description: Solicitud inválida
+      content:
+        application/json:
+          schema: {$ref: "#/components/schemas/ErrorResponse"}
+    Unauthorized:
+      description: No autenticado
+      content:
+        application/json:
+          schema: {$ref: "#/components/schemas/ErrorResponse"}
+    NotFound:
+      description: No encontrado
+      content:
+        application/json:
+          schema: {$ref: "#/components/schemas/ErrorResponse"}
+    Conflict:
+      description: Conflicto
+      content:
+        application/json:
+          schema: {$ref: "#/components/schemas/ErrorResponse"}
+  schemas:
+    ErrorResponse:
+      type: object
+      properties:
+        error:
+          type: object
+          properties:
+            code: {type: string}
+            message: {type: string}
+    User:
+      type: object
+      properties:
+        id: {type: string, format: uuid}
+        email: {type: string, format: email}
+        full_name: {type: string}
+        role: {type: string, enum: [traveler, analyst, admin]}
+        locale: {type: string}
+        region: {type: string}
+        created_at: {type: string, format: date-time}
+        updated_at: {type: string, format: date-time}
+    TokenPair:
+      type: object
+      properties:
+        access_token: {type: string}
+        refresh_token: {type: string}
+        token_type: {type: string, example: Bearer}
+        expires_in: {type: integer}
+        user: {$ref: "#/components/schemas/User"}
+    AuthResponse:
+      type: object
+      properties:
+        user: {$ref: "#/components/schemas/User"}
+        tokens: {$ref: "#/components/schemas/TokenPair"}
+    Trip:
+      type: object
+      properties:
+        id: {type: string, format: uuid}
+        name: {type: string}
+        destination: {type: string}
+        start_date: {type: string, format: date}
+        end_date: {type: string, format: date}
+        status: {type: string, enum: [active, archived]}
+        created_at: {type: string, format: date-time}
+        updated_at: {type: string, format: date-time}
+        reservations:
+          type: array
+          items: {$ref: "#/components/schemas/Reservation"}
+    Reservation:
+      type: object
+      properties:
+        id: {type: string, format: uuid}
+        trip_id: {type: string, format: uuid}
+        type: {type: string, enum: [flight, hotel, car, other]}
+        provider: {type: string}
+        provider_locator: {type: string}
+        title: {type: string}
+        destination: {type: string}
+        start_at: {type: string, format: date-time}
+        end_at: {type: string, format: date-time}
+        status: {type: string, enum: [confirmed, canceled]}
+        source: {type: string, enum: [email, provider, manual]}
+        source_ref: {type: string}
+        details: {type: object, additionalProperties: true}
+        last_synced_at: {type: string, format: date-time}
+        stale: {type: boolean}
+        created_at: {type: string, format: date-time}
+        updated_at: {type: string, format: date-time}
+        changes:
+          type: array
+          items: {$ref: "#/components/schemas/ReservationChange"}
+    ReservationInput:
+      type: object
+      required: [type]
+      properties:
+        type: {type: string, enum: [flight, hotel, car, other]}
+        provider: {type: string}
+        provider_locator: {type: string}
+        title: {type: string}
+        destination: {type: string}
+        start_at: {type: string, format: date-time}
+        end_at: {type: string, format: date-time}
+        status: {type: string, enum: [confirmed, canceled]}
+        details: {type: object, additionalProperties: true}
+        trip_id: {type: string, format: uuid}
+    ReservationChange:
+      type: object
+      properties:
+        id: {type: string, format: uuid}
+        reservation_id: {type: string, format: uuid}
+        source: {type: string}
+        changed_fields:
+          type: array
+          items: {type: string}
+        previous: {type: object, additionalProperties: true}
+        current: {type: object, additionalProperties: true}
+        created_at: {type: string, format: date-time}
+    Notification:
+      type: object
+      properties:
+        id: {type: string, format: uuid}
+        type: {type: string}
+        title: {type: string}
+        body: {type: string}
+        resource_type: {type: string}
+        resource_id: {type: string}
+        read_at: {type: string, format: date-time, nullable: true}
+        created_at: {type: string, format: date-time}
+    MailAccount:
+      type: object
+      properties:
+        id: {type: string, format: uuid}
+        provider: {type: string}
+        email: {type: string, format: email}
+        scopes:
+          type: array
+          items: {type: string}
+        status: {type: string, enum: [active, revoked]}
+        last_scanned_at: {type: string, format: date-time, nullable: true}
+        created_at: {type: string, format: date-time}
+        revoked_at: {type: string, format: date-time, nullable: true}
+    MailFilter:
+      type: object
+      required: [field, operator, value]
+      properties:
+        id: {type: string, format: uuid}
+        field: {type: string, enum: [sender, subject, body]}
+        operator: {type: string, enum: [contains, equals, not_contains, starts_with]}
+        value: {type: string}
+        active: {type: boolean, default: true}
+    WhitelistEntry:
+      type: object
+      properties:
+        id: {type: string, format: uuid}
+        pattern: {type: string}
+    IngestionEvent:
+      type: object
+      properties:
+        id: {type: string, format: uuid}
+        mailbox_id: {type: string, format: uuid}
+        channel: {type: string, enum: [imap, webhook]}
+        message_id: {type: string}
+        status: {type: string, enum: [pending, processing, processed, ignored, error]}
+        attempts: {type: integer}
+        last_error: {type: string}
+        received_at: {type: string, format: date-time}
+        processed_at: {type: string, format: date-time, nullable: true}
+        created_at: {type: string, format: date-time}
+    Agency:
+      type: object
+      properties:
+        id: {type: string, format: uuid}
+        name: {type: string}
+        email: {type: string}
+        phone: {type: string}
+        description: {type: string}
+    FavoriteAgency:
+      type: object
+      properties:
+        agency_id: {type: string, format: uuid}
+        created_at: {type: string, format: date-time}
+        agency: {$ref: "#/components/schemas/Agency"}
+    Recommendation:
+      type: object
+      properties:
+        id: {type: string, format: uuid}
+        agency_id: {type: string, format: uuid}
+        agency_name: {type: string}
+        title: {type: string}
+        destination: {type: string}
+        description: {type: string}
+        price_cents: {type: integer, format: int64}
+        currency: {type: string}
+        start_date: {type: string, format: date}
+        end_date: {type: string, format: date}
+        active: {type: boolean}
+    AgencyRequest:
+      type: object
+      properties:
+        id: {type: string, format: uuid}
+        agency_id: {type: string, format: uuid}
+        agency_name: {type: string}
+        reservation_id: {type: string, format: uuid}
+        recommendation_id: {type: string, format: uuid}
+        message: {type: string}
+        status: {type: string, enum: [open, closed]}
+        context: {type: object, additionalProperties: true}
+        created_at: {type: string, format: date-time}
+        closed_at: {type: string, format: date-time, nullable: true}
+    TripShare:
+      type: object
+      properties:
+        id: {type: string, format: uuid}
+        trip_id: {type: string, format: uuid}
+        guest_email: {type: string, format: email}
+        guest_user_id: {type: string, format: uuid}
+        created_at: {type: string, format: date-time}
+        revoked_at: {type: string, format: date-time, nullable: true}
+    SharedTrip:
+      type: object
+      properties:
+        share: {$ref: "#/components/schemas/TripShare"}
+        trip: {$ref: "#/components/schemas/Trip"}
+    SocialPreview:
+      type: object
+      properties:
+        network: {type: string}
+        network_name: {type: string}
+        trip_id: {type: string, format: uuid}
+        text: {type: string}
+        destination: {type: string}
+        start_date: {type: string, format: date}
+        end_date: {type: string, format: date}
+        reservations: {type: integer}
+        types:
+          type: object
+          additionalProperties: {type: integer}
+        contains_pii: {type: boolean, example: false}
+    SocialPost:
+      type: object
+      properties:
+        id: {type: string, format: uuid}
+        network: {type: string}
+        text: {type: string}
+        url: {type: string, format: uri}
+        created_at: {type: string, format: date-time}
+    AnalyticsBucket:
+      type: object
+      properties:
+        key: {type: string}
+        count: {type: integer, format: int64}
+    AnalyticsSummary:
+      type: object
+      properties:
+        from: {type: string, format: date-time}
+        to: {type: string, format: date-time}
+        trips: {type: integer, format: int64}
+        reservations: {type: integer, format: int64}
+        canceled: {type: integer, format: int64}
+        by_type:
+          type: array
+          items: {$ref: "#/components/schemas/AnalyticsBucket"}
+        by_provider:
+          type: array
+          items: {$ref: "#/components/schemas/AnalyticsBucket"}
+        top_destinations:
+          type: array
+          items: {$ref: "#/components/schemas/AnalyticsBucket"}
+        monthly:
+          type: array
+          items: {$ref: "#/components/schemas/AnalyticsBucket"}
+    AnalyticsFact:
+      type: object
+      properties:
+        id: {type: string, format: uuid}
+        destination: {type: string}
+        start_date: {type: string, format: date}
+        end_date: {type: string, format: date}
+        status: {type: string}
+        provider: {type: string}
+        type: {type: string}
+        agency_id: {type: string, format: uuid}
+        occurred_at: {type: string, format: date-time}
+        created_at: {type: string, format: date-time}
+    ProviderSnapshot:
+      type: object
+      properties:
+        type: {type: string, enum: [flight, hotel, car, other]}
+        title: {type: string}
+        destination: {type: string}
+        start_at: {type: string, format: date-time}
+        end_at: {type: string, format: date-time}
+        status: {type: string, enum: [confirmed, canceled]}
+        details: {type: object, additionalProperties: true}
