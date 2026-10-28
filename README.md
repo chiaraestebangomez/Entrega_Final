@@ -21,7 +21,7 @@ La implementación sigue los artefactos de la wiki del proyecto (historias de us
 ```bash
 git clone https://github.com/chiaraestebangomez/Entrega_Final
 cd Entrega_Final
-cp .env.example .env
+cd trotamundos
 docker compose up --build -d
 curl http://localhost:8080/readyz
 ```
