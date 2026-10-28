@@ -33,12 +33,7 @@ Abra `http://localhost:8080` para usar la aplicación.
 
 **Prueba de humo de extremo a extremo:**
 ```bash
-make smoke
-```
-
-**Para detener los servicios:**
-```bash
-docker compose down
+make test-e2e
 ```
 
 ---
