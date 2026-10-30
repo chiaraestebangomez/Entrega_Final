@@ -35,6 +35,8 @@ func main() {
 	}
 }
 
+
+// api
 func run() error {
 	cfg, err := config.Load()
 	if err != nil {
