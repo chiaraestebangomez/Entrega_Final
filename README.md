@@ -189,3 +189,5 @@ Los correos electrónicos se procesan por polling cada `INGESTION_POLL_INTERVAL`
 * La compartición social devuelve una publicación simulada.
 * El sharding está modelado y es configurable, pero la selección de pool por usuario aún no se aplica en los repositorios (un shard por defecto).
 * La analítica usa la misma base por defecto; para separar OLTP/OLAP configurar `OLAP_DATABASE_URL` con una réplica.
+
+---
