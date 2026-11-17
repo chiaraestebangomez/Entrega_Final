@@ -66,14 +66,30 @@ EVENTS=$(api GET /mail/events "$TOKEN")
 PROCESSED=$(printf '%s' "$EVENTS" | python3 -c 'import json,sys; d=json.load(sys.stdin)["data"]; print(sum(1 for e in d if e["status"] in ("processed","ignored")))')
 echo "eventos de ingesta finalizados: $PROCESSED"
 
-step "Agencia favorita y recomendaciones"
+step "Agencia favorita, preferencias y recomendaciones"
 AGENCIES=$(api GET /agencies "$TOKEN")
 AGENCY_ID=$(printf '%s' "$AGENCIES" | jget "['data'][0]['id']")
-api PUT /agencies/favorite "$TOKEN" "{\"agency_id\":\"$AGENCY_ID\"}" >/dev/null
+api PUT /me/favorite-agency "$TOKEN" "{\"agency_id\":\"$AGENCY_ID\"}" >/dev/null
+api PUT /me/preferences "$TOKEN" '{"max_budget_cents":50000000,"preferred_destinations":["Bariloche"],"preferred_start_date":"2030-01-01T00:00:00Z","preferred_end_date":"2030-01-08T00:00:00Z"}' >/dev/null
+PREFS=$(api GET /me/preferences "$TOKEN")
+BUDGET=$(printf '%s' "$PREFS" | jget "['preferences']['max_budget_cents']")
+echo "presupuesto guardado: $BUDGET"
+[[ "$BUDGET" == "50000000" ]]
 RECS=$(api GET /recommendations "$TOKEN")
 REC_ID=$(printf '%s' "$RECS" | jget "['data'][0]['id']")
-api POST "/recommendations/$REC_ID/inquire" "$TOKEN" '{"message":"Quisiera cotizar esta propuesta"}' >/dev/null
-echo "consulta enviada por recomendación $REC_ID"
+if [[ -n "$REC_ID" ]]; then
+  api POST "/recommendations/$REC_ID/info-request" "$TOKEN" '{"message":"Quisiera cotizar esta propuesta"}' >/dev/null
+  AGENCY_REQS=$(api GET /agency-requests "$TOKEN" | jget "['data'].__len__()")
+  echo "consultas a agencias: $AGENCY_REQS"
+  [[ "$AGENCY_REQS" -ge 1 ]]
+  api POST "/recommendations/$REC_ID/feedback" "$TOKEN" '{"action":"discarded"}' >/dev/null
+  RECS2=$(api GET /recommendations "$TOKEN")
+  DISCARD_STILL=$(printf '%s' "$RECS2" | REC_ID="$REC_ID" python3 -c 'import json,os,sys; print(any(r["id"]==os.environ["REC_ID"] for r in json.load(sys.stdin)["data"]))')
+  echo "descartada vuelve a aparecer: $DISCARD_STILL"
+  [[ "$DISCARD_STILL" == "False" ]]
+else
+  echo "sin recomendaciones disponibles para el smoke de feedback"
+fi
 
 step "Sincronización mock de proveedor"
 curl -sS -X PUT "$BASE/mock/providers/mockhotel/reservations/$LOCATOR" \

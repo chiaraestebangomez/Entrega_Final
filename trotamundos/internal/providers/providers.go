@@ -36,13 +36,18 @@ type Adapter interface {
 }
 
 type MockStore struct {
-	mu        sync.RWMutex
-	snapshots map[string]Snapshot
-	failures  map[string]bool
+	mu             sync.RWMutex
+	snapshots      map[string]Snapshot
+	failures       map[string]bool
+	agencyFailures map[string]bool
 }
 
 func NewMockStore() *MockStore {
-	return &MockStore{snapshots: map[string]Snapshot{}, failures: map[string]bool{}}
+	return &MockStore{
+		snapshots:      map[string]Snapshot{},
+		failures:       map[string]bool{},
+		agencyFailures: map[string]bool{},
+	}
 }
 
 func key(provider, locator string) string {
@@ -116,14 +121,16 @@ func (a *mockAdapter) GetReservation(_ context.Context, locator string) (Snapsho
 }
 
 type Registry struct {
-	mu       sync.RWMutex
-	store    *MockStore
-	adapters map[string]Adapter
-	now      func() time.Time
+	mu            sync.RWMutex
+	store         *MockStore
+	adapters      map[string]Adapter
+	agencies      map[string]AgencyAdapter
+	agencyCatalog AgencyCatalogStore
+	now           func() time.Time
 }
 
 func NewMockRegistry(store *MockStore) *Registry {
-	r := &Registry{store: store, adapters: map[string]Adapter{}, now: time.Now}
+	r := &Registry{store: store, adapters: map[string]Adapter{}, agencies: map[string]AgencyAdapter{}, now: time.Now}
 	for _, name := range []string{"flight", "hotel", "car", "other"} {
 		r.adapters[name] = newResilient(name, &mockAdapter{name: name, store: store})
 	}

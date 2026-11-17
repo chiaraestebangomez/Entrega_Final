@@ -30,6 +30,16 @@ const (
 
 	RequestOpen   = "open"
 	RequestClosed = "closed"
+
+	FeedbackInterested = "interested"
+	FeedbackDiscarded  = "discarded"
+	FeedbackAdjust     = "adjust"
+	FeedbackInquiry    = "inquiry"
+
+	RecoTypeLodging   = "lodging"
+	RecoTypeTransport = "transport"
+	RecoTypeRoute     = "route"
+	RecoTypePackage   = "package"
 )
 
 type User struct {
@@ -183,20 +193,100 @@ type Recommendation struct {
 	EndDate     *time.Time `json:"end_date,omitempty"`
 	Active      bool       `json:"active"`
 	Discarded   bool       `json:"discarded"`
+	Type        string     `json:"type,omitempty"`
+	Score       float64    `json:"score,omitempty"`
+	Reason      string     `json:"reason,omitempty"`
+	Interested  bool       `json:"interested"`
+}
+
+type RecommendationPreferences struct {
+	UserID                string     `json:"user_id,omitempty"`
+	MaxBudgetCents        int64      `json:"max_budget_cents,omitempty"`
+	LodgingTypes          []string   `json:"lodging_types,omitempty"`
+	TransportTypes        []string   `json:"transport_types,omitempty"`
+	PreferredDestinations []string   `json:"preferred_destinations,omitempty"`
+	PreferredStartDate    *time.Time `json:"preferred_start_date,omitempty"`
+	PreferredEndDate      *time.Time `json:"preferred_end_date,omitempty"`
+	UpdatedAt             time.Time  `json:"updated_at,omitempty"`
+}
+
+type RecommendationFeedback struct {
+	RecommendationID string                     `json:"recommendation_id"`
+	Action           string                     `json:"action"`
+	Adjustments      *RecommendationPreferences `json:"adjustments,omitempty"`
+}
+
+type FeedbackResult struct {
+	SignalID        string           `json:"signal_id"`
+	Recommendations []Recommendation `json:"recommendations"`
+}
+
+type AnonymizedSignal struct {
+	ID                 string    `json:"id"`
+	UserBucket         string    `json:"user_bucket"`
+	Destination        string    `json:"destination"`
+	RecommendationType string    `json:"recommendation_type"`
+	Action             string    `json:"action"`
+	PriceBucket        string    `json:"price_bucket"`
+	CreatedAt          time.Time `json:"created_at"`
+}
+
+type ModelSnapshot struct {
+	Version    string             `json:"version"`
+	TrainedAt  time.Time          `json:"trained_at"`
+	Affinities map[string]float64 `json:"affinities"`
+	Signals    int64              `json:"signals"`
+}
+
+type CandidatePool struct {
+	Snapshot    ModelSnapshot    `json:"snapshot"`
+	Candidates  []Recommendation `json:"candidates"`
+	GeneratedAt time.Time        `json:"generated_at"`
+}
+
+type AgencyCatalogItem struct {
+	ID          string     `json:"id"`
+	AgencyID    string     `json:"agency_id"`
+	AgencyName  string     `json:"agency_name"`
+	Title       string     `json:"title"`
+	Destination string     `json:"destination"`
+	Description string     `json:"description"`
+	Type        string     `json:"type,omitempty"`
+	PriceCents  int64      `json:"price_cents"`
+	Currency    string     `json:"currency"`
+	StartDate   *time.Time `json:"start_date,omitempty"`
+	EndDate     *time.Time `json:"end_date,omitempty"`
+	Stale       bool       `json:"stale,omitempty"`
+}
+
+type AgencyCatalogResult struct {
+	Items     []AgencyCatalogItem `json:"items"`
+	FetchedAt time.Time           `json:"fetched_at"`
+	Stale     bool                `json:"stale,omitempty"`
+}
+
+type AgencyDelivery struct {
+	RequestID string    `json:"request_id"`
+	AgencyID  string    `json:"agency_id"`
+	Status    string    `json:"status"`
+	Detail    string    `json:"detail,omitempty"`
+	SentAt    time.Time `json:"sent_at"`
+	Stale     bool      `json:"stale,omitempty"`
 }
 
 type AgencyRequest struct {
-	ID               string         `json:"id"`
-	UserID           string         `json:"user_id,omitempty"`
-	AgencyID         string         `json:"agency_id"`
-	AgencyName       string         `json:"agency_name,omitempty"`
-	ReservationID    string         `json:"reservation_id,omitempty"`
-	RecommendationID string         `json:"recommendation_id,omitempty"`
-	Message          string         `json:"message"`
-	Status           string         `json:"status"`
-	Context          map[string]any `json:"context,omitempty"`
-	CreatedAt        time.Time      `json:"created_at"`
-	ClosedAt         *time.Time     `json:"closed_at,omitempty"`
+	ID               string          `json:"id"`
+	UserID           string          `json:"user_id,omitempty"`
+	AgencyID         string          `json:"agency_id"`
+	AgencyName       string          `json:"agency_name,omitempty"`
+	ReservationID    string          `json:"reservation_id,omitempty"`
+	RecommendationID string          `json:"recommendation_id,omitempty"`
+	Message          string          `json:"message"`
+	Status           string          `json:"status"`
+	Context          map[string]any  `json:"context,omitempty"`
+	CreatedAt        time.Time       `json:"created_at"`
+	ClosedAt         *time.Time      `json:"closed_at,omitempty"`
+	Delivery         *AgencyDelivery `json:"delivery,omitempty"`
 }
 
 type AuditLog struct {

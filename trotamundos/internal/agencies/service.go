@@ -65,6 +65,14 @@ func (s *Service) DeleteFavorite(ctx context.Context, userID string, confirm boo
 	return s.repo.DeleteFavorite(ctx, userID)
 }
 
+func (s *Service) GetRecommendation(ctx context.Context, id string) (*domain.Recommendation, error) {
+	return s.repo.GetRecommendation(ctx, id)
+}
+
+func (s *Service) SaveRecommendation(ctx context.Context, rec domain.Recommendation) error {
+	return s.repo.SaveRecommendation(ctx, rec)
+}
+
 func (s *Service) Recommendations(ctx context.Context, userID string) ([]domain.Recommendation, error) {
 	if _, err := s.repo.GetFavorite(ctx, userID); err != nil {
 		if errors.Is(err, domain.ErrNotFound) {

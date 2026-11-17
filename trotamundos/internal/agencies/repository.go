@@ -21,6 +21,7 @@ type Repository interface {
 
 	ListRecommendations(ctx context.Context, userID string) ([]domain.Recommendation, error)
 	GetRecommendation(ctx context.Context, id string) (*domain.Recommendation, error)
+	SaveRecommendation(ctx context.Context, rec domain.Recommendation) error
 	RecordResponse(ctx context.Context, userID, recommendationID, action string) error
 
 	CreateRequest(ctx context.Context, req *domain.AgencyRequest) error
@@ -129,6 +130,18 @@ func (r *PostgresRepository) GetRecommendation(ctx context.Context, id string) (
 		return nil, err
 	}
 	return &rec, nil
+}
+
+func (r *PostgresRepository) SaveRecommendation(ctx context.Context, rec domain.Recommendation) error {
+	const q = `INSERT INTO itinerary.agency_recommendations
+		(id, agency_id, title, destination, description, price_cents, currency, start_date, end_date, active)
+		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)
+		ON CONFLICT (id) DO UPDATE SET title=EXCLUDED.title, destination=EXCLUDED.destination,
+		description=EXCLUDED.description, price_cents=EXCLUDED.price_cents, currency=EXCLUDED.currency,
+		start_date=EXCLUDED.start_date, end_date=EXCLUDED.end_date, active=EXCLUDED.active`
+	_, err := r.pool.Exec(ctx, q, rec.ID, rec.AgencyID, rec.Title, rec.Destination, rec.Description,
+		rec.PriceCents, rec.Currency, rec.StartDate, rec.EndDate, rec.Active)
+	return err
 }
 
 func (r *PostgresRepository) RecordResponse(ctx context.Context, userID, recommendationID, action string) error {

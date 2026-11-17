@@ -16,6 +16,7 @@ tags:
   - name: Reservations
   - name: Ingestion
   - name: Agencies
+  - name: Recommendations
   - name: Sharing
   - name: Social
   - name: Analytics
@@ -525,22 +526,96 @@ paths:
                   event_id: {type: string, format: uuid}
                   status: {type: string}
         "401": {$ref: "#/components/responses/Unauthorized"}
-  /agencies:
-    get:
-      tags: [Agencies]
-      summary: Catálogo de agencias
-      responses:
-        "200":
-          description: Agencias
-          content:
-            application/json:
-              schema:
-                type: object
-                properties:
-                  data:
-                    type: array
-                    items: {$ref: "#/components/schemas/Agency"}
-  /agencies/favorite:
+   /agencies:
+     get:
+       tags: [Agencies, Recommendations]
+       summary: Catálogo de agencias integradas
+       responses:
+         "200":
+           description: Agencias
+           content:
+             application/json:
+               schema:
+                 type: object
+                 properties:
+                   data:
+                     type: array
+                     items: {$ref: "#/components/schemas/Agency"}
+   /me/favorite-agency:
+     get:
+       tags: [Recommendations]
+       summary: Agencia favorita actual
+       responses:
+         "200":
+           description: Favorita (puede ser null)
+           content:
+             application/json:
+               schema:
+                 type: object
+                 properties:
+                   favorite:
+                     nullable: true
+                     allOf: [{$ref: "#/components/schemas/FavoriteAgency"}]
+     put:
+       tags: [Recommendations]
+       summary: Elegir o cambiar la agencia favorita
+       requestBody:
+         required: true
+         content:
+           application/json:
+             schema:
+               type: object
+               required: [agency_id]
+               properties:
+                 agency_id: {type: string, format: uuid}
+       responses:
+         "200":
+           description: Favorita actualizada
+           content:
+             application/json:
+               schema: {$ref: "#/components/schemas/FavoriteAgency"}
+         "404": {$ref: "#/components/responses/NotFound"}
+     delete:
+       tags: [Recommendations]
+       summary: Quitar la agencia favorita (requiere confirmación)
+       parameters:
+         - name: confirm
+           in: query
+           required: true
+           schema: {type: boolean, enum: [true]}
+       responses:
+         "204": {description: Favorita eliminada}
+   /me/preferences:
+     get:
+       tags: [Recommendations]
+       summary: Preferencias de recomendación del viajero
+       responses:
+         "200":
+           description: Preferencias (pueden ser null)
+           content:
+             application/json:
+               schema:
+                 type: object
+                 properties:
+                   preferences:
+                     nullable: true
+                     allOf: [{$ref: "#/components/schemas/RecommendationPreferences"}]
+     put:
+       tags: [Recommendations]
+       summary: Ajustar preferencias de recomendación
+       requestBody:
+         required: true
+         content:
+           application/json:
+             schema: {$ref: "#/components/schemas/RecommendationPreferences"}
+       responses:
+         "200":
+           description: Preferencias guardadas
+           content:
+             application/json:
+               schema: {$ref: "#/components/schemas/RecommendationPreferences"}
+         "400": {$ref: "#/components/responses/BadRequest"}
+   /agencies/favorite:
     get:
       tags: [Agencies]
       summary: Agencia favorita
@@ -584,22 +659,60 @@ paths:
           schema: {type: boolean}
       responses:
         "204": {description: Eliminada}
-  /recommendations:
-    get:
-      tags: [Agencies]
-      summary: Recomendaciones de la agencia favorita
-      responses:
-        "200":
-          description: Recomendaciones
-          content:
-            application/json:
-              schema:
-                type: object
-                properties:
-                  data:
-                    type: array
-                    items: {$ref: "#/components/schemas/Recommendation"}
-  /recommendations/{id}/discard:
+   /recommendations:
+     get:
+       tags: [Recommendations]
+       summary: Recomendaciones personalizadas y etiquetadas por agencia
+       description: >
+         Re-ranking liviano sobre el pool del modelo global. Ninguna recomendación
+         se agrega al itinerario sin decisión explícita del viajero.
+       responses:
+         "200":
+           description: Recomendaciones (separadas de los viajes reales)
+           content:
+             application/json:
+               schema:
+                 type: object
+                 properties:
+                   data:
+                     type: array
+                     items: {$ref: "#/components/schemas/Recommendation"}
+   /recommendations/{id}/feedback:
+     post:
+       tags: [Recommendations]
+       summary: Registrar interés, descarte o ajuste de parámetros
+       parameters: [{$ref: "#/components/parameters/Id"}]
+       requestBody:
+         required: true
+         content:
+           application/json:
+             schema: {$ref: "#/components/schemas/RecommendationFeedback"}
+       responses:
+         "200":
+           description: Lista refinada de inmediato
+           content:
+             application/json:
+               schema: {$ref: "#/components/schemas/FeedbackResult"}
+         "400": {$ref: "#/components/responses/BadRequest"}
+   /recommendations/{id}/info-request:
+     post:
+       tags: [Recommendations]
+       summary: Pedir información de una recomendación a la agencia
+       parameters: [{$ref: "#/components/parameters/Id"}]
+       requestBody:
+         content:
+           application/json:
+             schema:
+               type: object
+               properties:
+                 message: {type: string, maxLength: 2000}
+       responses:
+         "202":
+           description: Solicitud enviada a la agencia
+           content:
+             application/json:
+               schema: {$ref: "#/components/schemas/AgencyRequest"}
+   /recommendations/{id}/discard:
     post:
       tags: [Agencies]
       summary: Descartar recomendación
@@ -625,22 +738,42 @@ paths:
           content:
             application/json:
               schema: {$ref: "#/components/schemas/AgencyRequest"}
-  /agency-requests:
-    get:
-      tags: [Agencies]
-      summary: Consultas a agencias
-      responses:
-        "200":
-          description: Consultas
-          content:
-            application/json:
-              schema:
-                type: object
-                properties:
-                  data:
-                    type: array
-                    items: {$ref: "#/components/schemas/AgencyRequest"}
-  /agency-requests/{id}:
+   /agency-requests:
+     get:
+       tags: [Agencies]
+       summary: Consultas a agencias
+       responses:
+         "200":
+           description: Consultas
+           content:
+             application/json:
+               schema:
+                 type: object
+                 properties:
+                   data:
+                     type: array
+                     items: {$ref: "#/components/schemas/AgencyRequest"}
+     post:
+       tags: [Recommendations]
+       summary: Crear solicitud de información o contacto con la agencia favorita
+       requestBody:
+         required: true
+         content:
+           application/json:
+             schema:
+               type: object
+               properties:
+                 recommendation_id: {type: string, format: uuid}
+                 reservation_id: {type: string, format: uuid}
+                 message: {type: string, maxLength: 2000}
+       responses:
+         "202":
+           description: Solicitud creada y derivada mediante IAgencyAdapter
+           content:
+             application/json:
+               schema: {$ref: "#/components/schemas/AgencyRequest"}
+         "400": {$ref: "#/components/responses/BadRequest"}
+   /agency-requests/{id}:
     get:
       tags: [Agencies]
       summary: Detalle de consulta
@@ -1107,21 +1240,76 @@ components:
         agency_id: {type: string, format: uuid}
         created_at: {type: string, format: date-time}
         agency: {$ref: "#/components/schemas/Agency"}
-    Recommendation:
-      type: object
-      properties:
-        id: {type: string, format: uuid}
-        agency_id: {type: string, format: uuid}
-        agency_name: {type: string}
-        title: {type: string}
-        destination: {type: string}
-        description: {type: string}
-        price_cents: {type: integer, format: int64}
-        currency: {type: string}
-        start_date: {type: string, format: date}
-        end_date: {type: string, format: date}
-        active: {type: boolean}
-    AgencyRequest:
+     Recommendation:
+       type: object
+       properties:
+         id: {type: string, format: uuid}
+         agency_id: {type: string, format: uuid}
+         agency_name: {type: string}
+         title: {type: string}
+         destination: {type: string}
+         description: {type: string}
+         price_cents: {type: integer, format: int64}
+         currency: {type: string}
+         start_date: {type: string, format: date}
+         end_date: {type: string, format: date}
+         active: {type: boolean}
+         type: {type: string, enum: [lodging, transport, route, package]}
+         score: {type: number, format: double}
+         reason: {type: string}
+         interested: {type: boolean}
+     RecommendationPreferences:
+       type: object
+       properties:
+         user_id: {type: string, format: uuid}
+         max_budget_cents: {type: integer, format: int64}
+         lodging_types: {type: array, items: {type: string}}
+         transport_types: {type: array, items: {type: string}}
+         preferred_destinations: {type: array, items: {type: string}}
+         preferred_start_date: {type: string, format: date}
+         preferred_end_date: {type: string, format: date}
+         updated_at: {type: string, format: date-time}
+     RecommendationFeedback:
+       type: object
+       required: [action]
+       properties:
+         recommendation_id: {type: string, format: uuid}
+         action: {type: string, enum: [interested, discarded, adjust]}
+         adjustments: {$ref: "#/components/schemas/RecommendationPreferences"}
+     FeedbackResult:
+       type: object
+       properties:
+         signal_id: {type: string, format: uuid}
+         recommendations:
+           type: array
+           items: {$ref: "#/components/schemas/Recommendation"}
+     AnonymizedSignal:
+       type: object
+       description: Señal sin datos personales; apta para la réplica analítica
+       properties:
+         id: {type: string, format: uuid}
+         user_bucket: {type: string}
+         destination: {type: string}
+         recommendation_type: {type: string}
+         action: {type: string}
+         price_bucket: {type: string}
+         created_at: {type: string, format: date-time}
+     ModelSnapshot:
+       type: object
+       properties:
+         version: {type: string}
+         trained_at: {type: string, format: date-time}
+         affinities: {type: object, additionalProperties: {type: number, format: double}}
+         signals: {type: integer, format: int64}
+     CandidatePool:
+       type: object
+       properties:
+         snapshot: {$ref: "#/components/schemas/ModelSnapshot"}
+         candidates:
+           type: array
+           items: {$ref: "#/components/schemas/Recommendation"}
+         generated_at: {type: string, format: date-time}
+     AgencyRequest:
       type: object
       properties:
         id: {type: string, format: uuid}
@@ -1131,10 +1319,19 @@ components:
         recommendation_id: {type: string, format: uuid}
         message: {type: string}
         status: {type: string, enum: [open, closed]}
-        context: {type: object, additionalProperties: true}
-        created_at: {type: string, format: date-time}
-        closed_at: {type: string, format: date-time, nullable: true}
-    TripShare:
+         context: {type: object, additionalProperties: true}
+         created_at: {type: string, format: date-time}
+         closed_at: {type: string, format: date-time, nullable: true}
+         delivery: {$ref: "#/components/schemas/AgencyDelivery"}
+     AgencyDelivery:
+       type: object
+       properties:
+         request_id: {type: string, format: uuid}
+         agency_id: {type: string, format: uuid}
+         status: {type: string, enum: [delivered, failed]}
+         detail: {type: string}
+         sent_at: {type: string, format: date-time}
+     TripShare:
       type: object
       properties:
         id: {type: string, format: uuid}

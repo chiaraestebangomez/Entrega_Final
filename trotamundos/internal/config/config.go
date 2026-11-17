@@ -38,6 +38,13 @@ type Config struct {
 	AutoArchiveInterval   time.Duration
 	StaleEventAfter       time.Duration
 
+	RecommendationResultTTL     time.Duration
+	RecommendationSnapshotTTL   time.Duration
+	RecommendationPoolTTL       time.Duration
+	RecommendationLockTTL       time.Duration
+	RecommendationSignalWindow  time.Duration
+	RecommendationBatchInterval time.Duration
+
 	SeedAnalystEmail    string
 	SeedAnalystPassword string
 
@@ -83,6 +90,24 @@ func Load() (Config, error) {
 		return c, err
 	}
 	if c.StaleEventAfter, err = envDuration("STALE_EVENT_AFTER", 2*time.Minute); err != nil {
+		return c, err
+	}
+	if c.RecommendationResultTTL, err = envDuration("RECOMMENDATION_RESULT_TTL", 5*time.Minute); err != nil {
+		return c, err
+	}
+	if c.RecommendationSnapshotTTL, err = envDuration("RECOMMENDATION_SNAPSHOT_TTL", 24*time.Hour); err != nil {
+		return c, err
+	}
+	if c.RecommendationPoolTTL, err = envDuration("RECOMMENDATION_POOL_TTL", 24*time.Hour); err != nil {
+		return c, err
+	}
+	if c.RecommendationLockTTL, err = envDuration("RECOMMENDATION_LOCK_TTL", 10*time.Minute); err != nil {
+		return c, err
+	}
+	if c.RecommendationSignalWindow, err = envDuration("RECOMMENDATION_SIGNAL_WINDOW", 30*24*time.Hour); err != nil {
+		return c, err
+	}
+	if c.RecommendationBatchInterval, err = envDuration("RECOMMENDATION_BATCH_INTERVAL", 6*time.Hour); err != nil {
 		return c, err
 	}
 	if c.EnableWorkers, err = envBool("ENABLE_WORKERS", true); err != nil {

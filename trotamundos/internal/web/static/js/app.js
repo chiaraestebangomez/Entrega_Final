@@ -17,6 +17,7 @@ const state = {
   agencies: [],
   favorite: null,
   recommendations: [],
+  preferences: null,
   requests: [],
   sharedWithMe: [],
   sharedSent: [],
@@ -669,13 +670,14 @@ End: ${start}T10:00:00Z</textarea></label>
 }
 
 async function renderAgency() {
-  const [agencies, favorite, recommendations, requests] = await Promise.all([
-    api('/agencies'), api('/agencies/favorite'), api('/recommendations'), api('/agency-requests'),
+  const [agencies, favorite, recommendations, requests, preferences] = await Promise.all([
+    api('/agencies'), api('/me/favorite-agency'), api('/recommendations'), api('/agency-requests'), api('/me/preferences'),
   ]);
   state.agencies = agencies.data || [];
   state.favorite = favorite.favorite;
   state.recommendations = recommendations.data || [];
   state.requests = requests.data || [];
+  state.preferences = preferences.preferences || null;
   const fav = state.favorite;
   const agency = fav?.agency;
   const view = document.getElementById('view');
@@ -695,6 +697,16 @@ async function renderAgency() {
       </div>
     </div></section>` : ''}
 
+    <section class="card" style="margin-top:14px">
+      <div class="card-head"><div><div class="card-title">Preferencias de recomendación</div><div class="card-sub">Ajustá presupuesto, alojamiento, transporte, destinos y fechas.</div></div><span class="pill">Human-in-the-loop</span></div>
+      <div class="card-body" style="padding-top:12px">
+        <form data-form="reco-preferences" class="stack">
+          ${recommendationFields(state.preferences)}
+          <div class="form-actions full"><button class="btn btn-primary btn-sm" type="submit">${icon('sparkles', 14)} Guardar preferencias</button></div>
+        </form>
+      </div>
+    </section>
+
     ${!fav ? `<section style="margin-top:18px"><div class="agency-grid">${state.agencies.map((a) => `<article class="agency-card">
       <div class="row-between"><div class="agency-name">${esc(a.name)}</div><span class="stat-icon gold">${icon('sparkles', 17)}</span></div>
       <div class="agency-desc">${esc(a.description)}</div>
@@ -706,7 +718,13 @@ async function renderAgency() {
       ${state.recommendations.length ? `<div class="grid grid-2" style="margin-top:14px">${state.recommendations.map((rec) => `<article class="recommendation">
         <div class="rec-top"><div><div class="rec-title">${esc(rec.title)}</div><div class="muted small">${esc(rec.destination)} · ${esc(formatRange(rec.start_date, rec.end_date))}</div></div><span class="price">${esc(formatMoney(rec.price_cents, rec.currency))}</span></div>
         <div class="rec-desc">${esc(rec.description)}</div>
-        <div class="row"><button class="btn btn-coral btn-sm" type="button" data-action="inquire-rec" data-id="${esc(rec.id)}">${icon('send', 14)} Consultar</button><button class="btn btn-ghost btn-sm" type="button" data-action="discard-rec" data-id="${esc(rec.id)}">Descartar</button></div>
+        <div class="muted tiny">${icon('sparkles', 12)} ${esc(rec.agency_name || 'Agencia favorita')}${rec.reason ? ` · ${esc(rec.reason)}` : ''}${rec.interested ? ' · te interesó' : ''}</div>
+        <div class="row">
+          <button class="btn btn-coral btn-sm" type="button" data-action="inquire-rec" data-id="${esc(rec.id)}">${icon('send', 14)} Consultar</button>
+          <button class="btn btn-outline btn-sm" type="button" data-action="interest-rec" data-id="${esc(rec.id)}">Me interesa</button>
+          <button class="btn btn-ghost btn-sm" type="button" data-action="adjust-rec" data-id="${esc(rec.id)}">Ajustar</button>
+          <button class="btn btn-ghost btn-sm" type="button" data-action="discard-rec" data-id="${esc(rec.id)}">Descartar</button>
+        </div>
       </article>`).join('')}</div>` : `<div style="margin-top:14px">${emptyState('sparkles', 'No hay recomendaciones activas', 'Cuando tu agencia publique nuevas propuestas van a aparecer acá.')}</div>`}
     </section>`}
 
@@ -841,6 +859,50 @@ function openShareModal(tripId) {
       <label class="field"><span>Email del invitado</span><input name="guest_email" type="email" placeholder="amigo@ejemplo.com" required></label>
       <div class="form-error hidden"></div>
       <div class="form-actions"><button class="btn btn-outline" type="button" data-modal-close>Cancelar</button><button class="btn btn-primary" type="submit">${icon('share', 15)} Compartir</button></div>
+    </form>`,
+  });
+}
+
+function dateValue(value) {
+  return value ? String(value).slice(0, 10) : '';
+}
+
+function recommendationFields(prefs) {
+  const p = prefs || {};
+  return `
+    <label class="field"><span>Presupuesto máximo (USD, 0 = sin límite)</span><input name="max_budget" type="number" min="0" step="100" value="${Math.round(Number(p.max_budget_cents || 0) / 100)}"></label>
+    <label class="field"><span>Tipos de alojamiento (separados por coma)</span><input name="lodging_types" value="${esc((p.lodging_types || []).join(', '))}" placeholder="lodging, hotel"></label>
+    <label class="field"><span>Tipos de transporte (separados por coma)</span><input name="transport_types" value="${esc((p.transport_types || []).join(', '))}" placeholder="transport"></label>
+    <label class="field full"><span>Destinos preferidos (separados por coma)</span><input name="preferred_destinations" value="${esc((p.preferred_destinations || []).join(', '))}" placeholder="Bariloche, Mendoza"></label>
+    <label class="field"><span>Desde</span><input name="preferred_start_date" type="date" value="${esc(dateValue(p.preferred_start_date))}"></label>
+    <label class="field"><span>Hasta</span><input name="preferred_end_date" type="date" value="${esc(dateValue(p.preferred_end_date))}"></label>`;
+}
+
+function dateParam(value) {
+  return value ? `${String(value).slice(0, 10)}T00:00:00Z` : null;
+}
+
+function recommendationPayload(raw) {
+  const split = (value) => String(value || '').split(',').map((v) => v.trim()).filter(Boolean);
+  return {
+    max_budget_cents: Math.round(Number(raw.max_budget || 0) * 100),
+    lodging_types: split(raw.lodging_types),
+    transport_types: split(raw.transport_types),
+    preferred_destinations: split(raw.preferred_destinations),
+    preferred_start_date: dateParam(raw.preferred_start_date),
+    preferred_end_date: dateParam(raw.preferred_end_date),
+  };
+}
+
+function openAdjustModal(recId) {
+  openModal({
+    title: 'Ajustar recomendaciones',
+    subtitle: 'Los cambios se reflejan al instante y mejoran el modelo futuro.',
+    body: `<form data-form="reco-adjust" class="stack">
+      <input type="hidden" name="id" value="${esc(recId)}">
+      ${recommendationFields(state.preferences)}
+      <div class="form-error hidden"></div>
+      <div class="form-actions full"><button class="btn btn-outline" type="button" data-modal-close>Cancelar</button><button class="btn btn-primary" type="submit">${icon('sparkles', 14)} Aplicar ajustes</button></div>
     </form>`,
   });
 }
@@ -1075,14 +1137,14 @@ async function handleAction(action, el) {
       break;
     }
     case 'set-favorite':
-      await api('/agencies/favorite', { method: 'PUT', body: { agency_id: el.dataset.id } });
+      await api('/me/favorite-agency', { method: 'PUT', body: { agency_id: el.dataset.id } });
       toast('Agencia favorita actualizada.');
       await renderRoute();
       break;
     case 'remove-favorite': {
       const ok = await confirmDialog({ title: 'Quitar agencia favorita', message: 'Dejás de recibir recomendaciones de esta agencia.', confirmLabel: 'Quitar', danger: true });
       if (!ok) return;
-      await api('/agencies/favorite?confirm=true', { method: 'DELETE' });
+      await api('/me/favorite-agency?confirm=true', { method: 'DELETE' });
       toast('Agencia favorita eliminada.');
       await renderRoute();
       break;
@@ -1090,11 +1152,19 @@ async function handleAction(action, el) {
     case 'discard-rec': {
       const ok = await confirmDialog({ title: 'Descartar recomendación', message: 'No vas a volver a ver esta propuesta. ¿Querés descartarla?', confirmLabel: 'Descartar', danger: true });
       if (!ok) return;
-      await api(`/recommendations/${el.dataset.id}/discard`, { method: 'POST' });
-      toast('Recomendación descartada.');
+      await api(`/recommendations/${el.dataset.id}/feedback`, { method: 'POST', body: { action: 'discarded' } });
+      toast('Recomendación descartada. No va a volver a mostrarse.');
       await renderRoute();
       break;
     }
+    case 'interest-rec':
+      await api(`/recommendations/${el.dataset.id}/feedback`, { method: 'POST', body: { action: 'interested' } });
+      toast('Interés registrado. No se agregó nada a tu itinerario.');
+      await renderRoute();
+      break;
+    case 'adjust-rec':
+      openAdjustModal(el.dataset.id);
+      break;
     case 'inquire-rec':
       openInquireModal(el.dataset.id);
       break;
@@ -1155,6 +1225,8 @@ async function onSubmit(event) {
     if (type === 'whitelist') return await submitWhitelist(form);
     if (type === 'filter') return await submitFilter(form);
     if (type === 'inquire-rec') return await submitInquire(form);
+    if (type === 'reco-preferences') return await submitRecommendationPreferences(form);
+    if (type === 'reco-adjust') return await submitRecommendationAdjust(form);
     if (type === 'agency-request') return await submitAgencyRequest(form);
     if (type === 'analytics-range') return await submitAnalyticsRange(form);
   } catch (err) {
@@ -1328,8 +1400,37 @@ async function submitInquire(form) {
   setFormBusy(form, true, 'Enviando...');
   try {
     const raw = Object.fromEntries(new FormData(form));
-    await api(`/recommendations/${raw.id}/inquire`, { method: 'POST', body: { message: String(raw.message || '').trim() } });
+    await api(`/recommendations/${raw.id}/info-request`, { method: 'POST', body: { message: String(raw.message || '').trim() } });
     toast('Consulta enviada a tu agencia.');
+    closeModal();
+    await renderRoute();
+  } finally {
+    setFormBusy(form, false);
+  }
+}
+
+async function submitRecommendationPreferences(form) {
+  clearFormError(form);
+  setFormBusy(form, true, 'Guardando...');
+  try {
+    await api('/me/preferences', { method: 'PUT', body: recommendationPayload(Object.fromEntries(new FormData(form))) });
+    toast('Preferencias guardadas. Las recomendaciones se ajustaron.');
+    await renderRoute();
+  } finally {
+    setFormBusy(form, false);
+  }
+}
+
+async function submitRecommendationAdjust(form) {
+  clearFormError(form);
+  setFormBusy(form, true, 'Ajustando...');
+  try {
+    const raw = Object.fromEntries(new FormData(form));
+    await api(`/recommendations/${raw.id}/feedback`, {
+      method: 'POST',
+      body: { action: 'adjust', adjustments: recommendationPayload(raw) },
+    });
+    toast('Parámetros ajustados. La lista se actualizó al instante.');
     closeModal();
     await renderRoute();
   } finally {

@@ -11,25 +11,27 @@ import (
 	"trotamundos/internal/itinerary"
 	"trotamundos/internal/platform/httpx"
 	"trotamundos/internal/providers"
+	"trotamundos/internal/recommendation"
 	"trotamundos/internal/sharing"
 	"trotamundos/internal/social"
 	"trotamundos/internal/web"
 )
 
 type Deps struct {
-	Authenticator *auth.Authenticator
-	Auth          *auth.Handler
-	Itinerary     *itinerary.Handler
-	Ingestion     *ingestion.Handler
-	Agencies      *agencies.Handler
-	Sharing       *sharing.Handler
-	Social        *social.Handler
-	Analytics     *analytics.Handler
-	Providers     *providers.Handler
-	MockKey       string
-	Health        func(r *http.Request) error
-	Logger        *slog.Logger
-	AllowedOrigin string
+	Authenticator  *auth.Authenticator
+	Auth           *auth.Handler
+	Itinerary      *itinerary.Handler
+	Ingestion      *ingestion.Handler
+	Agencies       *agencies.Handler
+	Recommendation *recommendation.Handler
+	Sharing        *sharing.Handler
+	Social         *social.Handler
+	Analytics      *analytics.Handler
+	Providers      *providers.Handler
+	MockKey        string
+	Health         func(r *http.Request) error
+	Logger         *slog.Logger
+	AllowedOrigin  string
 }
 
 func NewRouter(d Deps) http.Handler {
@@ -100,16 +102,25 @@ func NewRouter(d Deps) http.Handler {
 	mux.HandleFunc("PUT /mock/providers/{provider}/reservations/{locator}", requireKey(d.MockKey, d.Providers.Seed))
 	mux.HandleFunc("DELETE /mock/providers/{provider}/reservations/{locator}", requireKey(d.MockKey, d.Providers.Cancel))
 	mux.HandleFunc("POST /mock/providers/{provider}/fail", requireKey(d.MockKey, d.Providers.Fail))
+	mux.HandleFunc("POST /mock/agencies/{id}/fail", requireKey(d.MockKey, d.Providers.AgencyFail))
 
-	mux.Handle("GET /agencies", guard(d.Agencies.ListAgencies))
+	mux.Handle("GET /agencies", guard(d.Recommendation.Agencies))
 	mux.Handle("GET /agencies/favorite", guard(d.Agencies.GetFavorite))
 	mux.Handle("PUT /agencies/favorite", guard(d.Agencies.SetFavorite))
 	mux.Handle("DELETE /agencies/favorite", guard(d.Agencies.DeleteFavorite))
-	mux.Handle("GET /recommendations", guard(d.Agencies.ListRecommendations))
+	mux.Handle("GET /me/favorite-agency", guard(d.Recommendation.Favorite))
+	mux.Handle("PUT /me/favorite-agency", guard(d.Recommendation.SetFavorite))
+	mux.Handle("DELETE /me/favorite-agency", guard(d.Recommendation.DeleteFavorite))
+	mux.Handle("GET /me/preferences", guard(d.Recommendation.Preferences))
+	mux.Handle("PUT /me/preferences", guard(d.Recommendation.UpdatePreferences))
+	mux.Handle("GET /recommendations", guard(d.Recommendation.Recommendations))
+	mux.Handle("POST /recommendations/{id}/feedback", guard(d.Recommendation.Feedback))
+	mux.Handle("POST /recommendations/{id}/info-request", guard(d.Recommendation.InfoRequest))
 	mux.Handle("POST /recommendations/{id}/discard", guard(d.Agencies.Discard))
 	mux.Handle("POST /recommendations/{id}/inquire", guard(d.Agencies.Inquire))
 	mux.Handle("GET /agency-requests", guard(d.Agencies.ListRequests))
-	mux.Handle("GET /agency-requests/{id}", guard(d.Agencies.GetRequest))
+	mux.Handle("POST /agency-requests", guard(d.Recommendation.CreateAgencyRequest))
+	mux.Handle("GET /agency-requests/{id}", guard(d.Recommendation.GetRequest))
 	mux.Handle("POST /agency-requests/{id}/close", guard(d.Agencies.CloseRequest))
 	mux.HandleFunc("GET /social/networks", d.Social.Networks)
 

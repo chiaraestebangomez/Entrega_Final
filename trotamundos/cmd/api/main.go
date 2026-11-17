@@ -24,6 +24,7 @@ import (
 	"trotamundos/internal/platform/redisx"
 	"trotamundos/internal/platform/secrets"
 	"trotamundos/internal/providers"
+	"trotamundos/internal/recommendation"
 	"trotamundos/internal/sharing"
 	"trotamundos/internal/social"
 )
@@ -34,7 +35,6 @@ func main() {
 		os.Exit(1)
 	}
 }
-
 
 // api
 func run() error {
@@ -96,6 +96,7 @@ func run() error {
 
 	providerStore := providers.NewMockStore()
 	providerRegistry := providers.NewMockRegistry(providerStore)
+	providerRegistry.SetAgencyCatalog(providers.NewPostgresAgencyCatalog(directory))
 
 	itinRepo := itinerary.NewPostgresRepository(directory)
 	itinSvc := itinerary.NewService(itinRepo, providerRegistry, analyticsSvc)
@@ -109,19 +110,37 @@ func run() error {
 	sharingSvc := sharing.NewService(sharing.NewPostgresRepository(directory), itinSvc)
 	socialSvc := social.NewService(itinSvc)
 
+	recoSvc := recommendation.NewService(
+		recommendation.NewPostgresStore(directory, olap),
+		recommendation.NewRedisCache(redisClient),
+		agenciesSvc,
+		itinSvc,
+		providerRegistry,
+		logger,
+		recommendation.Options{
+			ResultTTL:    cfg.RecommendationResultTTL,
+			SnapshotTTL:  cfg.RecommendationSnapshotTTL,
+			PoolTTL:      cfg.RecommendationPoolTTL,
+			LockTTL:      cfg.RecommendationLockTTL,
+			SignalWindow: cfg.RecommendationSignalWindow,
+			BatchLimit:   10000,
+		},
+	)
+
 	router := api.NewRouter(api.Deps{
-		Authenticator: auth.NewAuthenticator(signer),
-		Auth:          auth.NewHandler(authSvc),
-		Itinerary:     itinerary.NewHandler(itinSvc),
-		Ingestion:     ingestion.NewHandler(ingestionSvc, mailConnector, cfg.WebhookKey),
-		Agencies:      agencies.NewHandler(agenciesSvc),
-		Sharing:       sharing.NewHandler(sharingSvc),
-		Social:        social.NewHandler(socialSvc),
-		Analytics:     analytics.NewHandler(analyticsSvc),
-		Providers:     providers.NewHandler(providerStore),
-		MockKey:       cfg.MockControlKey,
-		Logger:        logger,
-		AllowedOrigin: cfg.AllowedOrigin,
+		Authenticator:  auth.NewAuthenticator(signer),
+		Auth:           auth.NewHandler(authSvc),
+		Itinerary:      itinerary.NewHandler(itinSvc),
+		Ingestion:      ingestion.NewHandler(ingestionSvc, mailConnector, cfg.WebhookKey),
+		Agencies:       agencies.NewHandler(agenciesSvc),
+		Recommendation: recommendation.NewHandler(recoSvc),
+		Sharing:        sharing.NewHandler(sharingSvc),
+		Social:         social.NewHandler(socialSvc),
+		Analytics:      analytics.NewHandler(analyticsSvc),
+		Providers:      providers.NewHandler(providerStore),
+		MockKey:        cfg.MockControlKey,
+		Logger:         logger,
+		AllowedOrigin:  cfg.AllowedOrigin,
 		Health: func(r *http.Request) error {
 			hctx, cancel := context.WithTimeout(r.Context(), 2*time.Second)
 			defer cancel()
@@ -145,6 +164,14 @@ func run() error {
 
 	if cfg.EnableWorkers {
 		go ingestionWorker.Run(ctx)
+		if _, err := recoSvc.RunBatch(ctx); err != nil {
+			logger.Warn("batch inicial de recomendaciones", "error", err)
+		}
+		go syncLoop(ctx, logger, cfg.RecommendationBatchInterval, func() {
+			if _, err := recoSvc.RunBatch(ctx); err != nil {
+				logger.Warn("batch de recomendaciones", "error", err)
+			}
+		})
 		go syncLoop(ctx, logger, cfg.ProviderSyncInterval, func() {
 			ok, failed := itinSvc.SyncDueReservations(ctx, 50)
 			if ok+failed > 0 {
