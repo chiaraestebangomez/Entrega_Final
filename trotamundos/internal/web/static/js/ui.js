@@ -319,13 +319,3 @@ export function setBusy(form, busy, label) {
     if (button.dataset.label) button.innerHTML = button.dataset.label;
   }
 }
-
-export function parseDetails(value) {
-  const text = String(value || '').trim();
-  if (!text) return {};
-  const parsed = JSON.parse(text);
-  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
-    throw new Error('Los detalles deben ser un objeto JSON');
-  }
-  return parsed;
-}

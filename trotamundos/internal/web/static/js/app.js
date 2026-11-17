@@ -161,6 +161,16 @@ function renderShell() {
               ${icon('bell', 19)}<span class="count hidden" id="bell-count">0</span>
             </a>
             <a class="icon-btn" href="#/mail" title="Correo" aria-label="Correo">${icon('mail', 19)}</a>
+            <div class="user-chip">
+              <span class="avatar sm">${esc(initials(user.full_name))}</span>
+              <span class="user-chip-meta">
+                <strong>${esc(user.full_name || 'Viajero')}</strong>
+                <span class="role-chip">${esc(roleLabel)}</span>
+              </span>
+              <button class="topbar-logout" type="button" data-action="logout" title="Cerrar sesión" aria-label="Cerrar sesión">
+                ${icon('logout', 15)}<span class="label-logout">Cerrar sesión</span>
+              </button>
+            </div>
           </div>
         </header>
         <div class="content" id="view"></div>
@@ -817,7 +827,7 @@ function notificationRow(n, actions = false) {
 
 function openReservationModal(reservation, tripId = '') {
   const editing = Boolean(reservation);
-  const r = reservation || { type: 'flight', status: 'confirmed', details: {} };
+  const r = reservation || { type: 'flight', status: 'confirmed' };
   openModal({
     title: editing ? 'Editar reserva' : 'Nueva reserva',
     subtitle: editing ? 'Los cambios se reflejan en el itinerario y la analítica.' : 'Si no elegís un viaje, lo agrupamos automáticamente por destino y fechas.',
@@ -839,7 +849,6 @@ function openReservationModal(reservation, tripId = '') {
         <label class="field full"><span>Destino</span><input name="destination" value="${esc(r.destination || '')}" placeholder="Bariloche" required></label>
         <label class="field"><span>Inicio</span><input type="datetime-local" name="start_at" value="${esc(toLocalInput(r.start_at))}"></label>
         <label class="field"><span>Fin</span><input type="datetime-local" name="end_at" value="${esc(toLocalInput(r.end_at))}"></label>
-        <label class="field full"><span>Detalles (JSON opcional)</span><textarea name="details" rows="4" placeholder='{"habitaciones":2}'>${esc(r.details ? JSON.stringify(r.details, null, 2) : '{}')}</textarea></label>
       </div>
       <div class="form-error hidden"></div>
       <div class="form-actions">
@@ -1273,7 +1282,6 @@ async function submitReservation(form) {
       provider_locator: String(raw.provider_locator || '').trim(),
       destination: String(raw.destination || '').trim(),
       status: raw.status || 'confirmed',
-      details: raw.details ? parseJsonObject(raw.details) : {},
     };
     if (raw.start_at) body.start_at = fromLocalInput(raw.start_at);
     if (raw.end_at) body.end_at = fromLocalInput(raw.end_at);
@@ -1544,14 +1552,6 @@ function friendlyError(err) {
     return 'No pudimos conectar con el servidor. Verificá que la API esté corriendo.';
   }
   return message;
-}
-
-function parseJsonObject(value) {
-  const parsed = JSON.parse(String(value || '').trim() || '{}');
-  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
-    throw new Error('Los detalles deben ser un objeto JSON');
-  }
-  return parsed;
 }
 
 function firstName(name = '') {
