@@ -133,6 +133,40 @@ func (h *Handler) InfoRequest(w http.ResponseWriter, r *http.Request) {
 	httpx.JSON(w, http.StatusAccepted, req)
 }
 
+// Discard es el alias de POST /recommendations/{id}/discard.
+// Delega en Feedback para compartir la validación de propiedad, el registro de
+// señales y la invalidación de caché; por eso responde 204 sin cuerpo.
+func (h *Handler) Discard(w http.ResponseWriter, r *http.Request) {
+	userID := auth.MustPrincipal(r.Context()).UserID
+	_, err := h.svc.Feedback(r.Context(), userID, r.PathValue("id"), domain.RecommendationFeedback{
+		Action: domain.FeedbackDiscarded,
+	})
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// Inquire es el alias de POST /recommendations/{id}/inquire.
+// Tiene el mismo cuerpo que InfoRequest y delega en él, devolviendo 202.
+func (h *Handler) Inquire(w http.ResponseWriter, r *http.Request) {
+	userID := auth.MustPrincipal(r.Context()).UserID
+	var body struct {
+		Message string `json:"message"`
+	}
+	if err := httpx.Decode(r, &body); err != nil {
+		httpx.Error(w, http.StatusBadRequest, "invalid_body", "cuerpo JSON inválido")
+		return
+	}
+	req, err := h.svc.InfoRequest(r.Context(), userID, r.PathValue("id"), body.Message)
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	httpx.JSON(w, http.StatusAccepted, req)
+}
+
 func (h *Handler) CreateAgencyRequest(w http.ResponseWriter, r *http.Request) {
 	userID := auth.MustPrincipal(r.Context()).UserID
 	var body struct {

@@ -2,6 +2,7 @@ package analytics
 
 import (
 	"context"
+	"net/http/httptest"
 	"testing"
 	"time"
 
@@ -53,5 +54,42 @@ func TestPublishNilReservation(t *testing.T) {
 	svc := NewService(&fakeRepo{})
 	if err := svc.PublishReservation(context.Background(), nil); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestRangeParamsAcceptsDateAndRFC3339(t *testing.T) {
+	cases := []struct {
+		name, from, to string
+	}{
+		{"date", "2026-12-20", "2026-12-25"},
+		{"rfc3339", "2026-12-20T08:30:00Z", "2026-12-25T20:10:00-03:00"},
+		{"mixed", "2026-12-20T08:30:00Z", "2026-12-25"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			req := httptest.NewRequest("GET", "/analytics/summary?from="+c.from+"&to="+c.to, nil)
+			from, to, err := rangeParams(req)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if from.Hour() != 0 || from.Minute() != 0 || from.Second() != 0 || from.Nanosecond() != 0 {
+				t.Fatalf("from no normalizado: %v", from)
+			}
+			if to.Hour() != 23 || to.Minute() != 59 || to.Second() != 59 || to.Nanosecond() != 999000000 {
+				t.Fatalf("to no normalizado: %v", to)
+			}
+			if from.Format(dateLayout) != "2026-12-20" || to.Format(dateLayout) != "2026-12-25" {
+				t.Fatalf("rango = %v..%v", from, to)
+			}
+		})
+	}
+}
+
+func TestRangeParamsRejectsInvalidValues(t *testing.T) {
+	for _, query := range []string{"from=2026-13-01", "to=no-valido", "from=2026-12-25&to=2026-12-20"} {
+		req := httptest.NewRequest("GET", "/analytics/summary?"+query, nil)
+		if _, _, err := rangeParams(req); err == nil {
+			t.Errorf("esperaba error para %q", query)
+		}
 	}
 }

@@ -11,6 +11,10 @@ export class ApiError extends Error {
   }
 }
 
+// La API Key identifica al cliente para cuotas (CON-01); el servidor la inyecta
+// en /api-config.js. No es una credencial de usuario: la autorización real es JWT.
+const CLIENT_API_KEY = globalThis.TROTAMUNDOS_CONFIG?.apiKey || '';
+
 export const session = {
   get access() {
     return localStorage.getItem(ACCESS_KEY) || '';
@@ -49,7 +53,10 @@ async function refreshTokens() {
   if (!refreshRequest) {
     refreshRequest = fetch('/auth/refresh', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: {
+        'Content-Type': 'application/json',
+        ...(CLIENT_API_KEY ? { 'X-API-Key': CLIENT_API_KEY } : {}),
+      },
       body: JSON.stringify({ refresh_token: session.refresh }),
     })
       .then(async (res) => {
@@ -70,6 +77,7 @@ export async function api(path, options = {}) {
   const { method = 'GET', body, headers = {}, auth = true, retry = true } = options;
   const requestHeaders = { ...headers };
   if (body !== undefined) requestHeaders['Content-Type'] = 'application/json';
+  if (CLIENT_API_KEY) requestHeaders['X-API-Key'] = CLIENT_API_KEY;
   if (auth && session.access) requestHeaders.Authorization = `Bearer ${session.access}`;
 
   const res = await fetch(path, {
@@ -107,13 +115,29 @@ export async function api(path, options = {}) {
 
 export async function logout() {
   const refresh = session.refresh;
-  try {
-    await api('/auth/logout', {
+  // El bearer es necesario para que el servidor revoque también el jti del
+  // access token; sin él sólo se revoca el refresh y el access sigue vigente.
+  const send = (withBearer) =>
+    api('/auth/logout', {
       method: 'POST',
       body: { refresh_token: refresh },
-      auth: false,
+      auth: withBearer,
       retry: false,
     });
+  try {
+    try {
+      await send(true);
+    } catch (err) {
+      if (err?.status === 401 && (await refreshTokens())) {
+        try {
+          await send(true);
+        } catch {
+          await send(false);
+        }
+      } else {
+        await send(false);
+      }
+    }
   } catch {
     // La sesión local se limpia igualmente.
   }

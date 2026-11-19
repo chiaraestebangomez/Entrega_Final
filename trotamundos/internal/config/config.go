@@ -31,6 +31,12 @@ type Config struct {
 
 	MockControlKey string
 	WebhookKey     string
+	APIKeys        []string
+	WebAPIKey      string
+
+	RateLimitPerMinute int
+	RateLimitWindow    time.Duration
+	TrustedProxies     []string
 
 	EnableWorkers         bool
 	IngestionPollInterval time.Duration
@@ -68,7 +74,15 @@ func Load() (Config, error) {
 		SeedAnalystEmail:    os.Getenv("SEED_ANALYST_EMAIL"),
 		SeedAnalystPassword: os.Getenv("SEED_ANALYST_PASSWORD"),
 		AllowedOrigin:       env("CORS_ALLOWED_ORIGIN", "*"),
+		RateLimitPerMinute:  300,
+		RateLimitWindow:     time.Minute,
 	}
+	c.APIKeys = splitList(os.Getenv("API_KEYS"))
+	c.WebAPIKey = os.Getenv("WEB_API_KEY")
+	if c.WebAPIKey == "" && len(c.APIKeys) > 0 {
+		c.WebAPIKey = c.APIKeys[0]
+	}
+	c.TrustedProxies = splitList(os.Getenv("TRUSTED_PROXIES"))
 
 	var err error
 	if c.RedisDB, err = envInt("REDIS_DB", 0); err != nil {
@@ -119,6 +133,18 @@ func Load() (Config, error) {
 	if c.ShardCount < 1 {
 		return c, fmt.Errorf("SHARD_COUNT must be >= 1")
 	}
+	if c.RateLimitPerMinute, err = envInt("RATE_LIMIT_PER_MINUTE", 300); err != nil {
+		return c, err
+	}
+	if c.RateLimitPerMinute < 1 {
+		return c, fmt.Errorf("RATE_LIMIT_PER_MINUTE must be >= 1")
+	}
+	if c.RateLimitWindow, err = envDuration("RATE_LIMIT_WINDOW", time.Minute); err != nil {
+		return c, err
+	}
+	if c.RateLimitWindow <= 0 {
+		return c, fmt.Errorf("RATE_LIMIT_WINDOW must be > 0")
+	}
 
 	shards := strings.TrimSpace(os.Getenv("DATABASE_SHARDS"))
 	if shards == "" {
@@ -137,6 +163,9 @@ func Load() (Config, error) {
 	}
 
 	key := os.Getenv("TOKEN_ENCRYPTION_KEY")
+	if key == "" && strings.EqualFold(c.Env, "production") {
+		return c, fmt.Errorf("TOKEN_ENCRYPTION_KEY is required when APP_ENV=production")
+	}
 	if key == "" {
 		key = base64.StdEncoding.EncodeToString([]byte("trotamundos-dev-token-key-32byte"))
 	}
@@ -148,7 +177,35 @@ func Load() (Config, error) {
 		return c, fmt.Errorf("TOKEN_ENCRYPTION_KEY must decode to 32 bytes, got %d", len(c.TokenEncryptionKey))
 	}
 
+	if strings.EqualFold(c.Env, "production") {
+		if c.AllowedOrigin == "*" {
+			return c, fmt.Errorf("CORS_ALLOWED_ORIGIN must be explicit when APP_ENV=production")
+		}
+		if c.MockControlKey == "" || strings.HasPrefix(c.MockControlKey, "dev-") {
+			return c, fmt.Errorf("MOCK_CONTROL_KEY must be a non-default secret when APP_ENV=production")
+		}
+		if c.WebhookKey == "" || strings.HasPrefix(c.WebhookKey, "dev-") {
+			return c, fmt.Errorf("WEBHOOK_KEY must be a non-default secret when APP_ENV=production")
+		}
+		if len(c.APIKeys) == 0 {
+			return c, fmt.Errorf("API_KEYS is required when APP_ENV=production (CON-01)")
+		}
+		if c.SeedAnalystEmail != "" && c.SeedAnalystPassword == "" {
+			return c, fmt.Errorf("SEED_ANALYST_PASSWORD is required when seeding an analyst in production")
+		}
+	}
+
 	return c, nil
+}
+
+func splitList(raw string) []string {
+	var out []string
+	for _, item := range strings.Split(raw, ",") {
+		if v := strings.TrimSpace(item); v != "" {
+			out = append(out, v)
+		}
+	}
+	return out
 }
 
 func env(name, fallback string) string {

@@ -54,4 +54,15 @@ func TestShouldProcessWhitelistAndFilters(t *testing.T) {
 	if !ShouldProcess(nil, inactive, msg) {
 		t.Fatal("los filtros inactivos deben ignorarse")
 	}
+	invalid := []domain.MailFilter{
+		{Field: "subject", Operator: "contains", Value: "   ", Active: true},
+		{Field: "desconocido", Operator: "contains", Value: "hotel", Active: true},
+		{Field: "subject", Operator: "desconocido", Value: "hotel", Active: true},
+	}
+	if !ShouldProcess(nil, invalid, msg) {
+		t.Fatal("los filtros inválidos no deben bloquear todos los correos")
+	}
+	if !ShouldProcess([]domain.WhitelistEntry{{Pattern: "  "}}, nil, msg) {
+		t.Fatal("una whitelist con patrones vacíos no debe bloquear todos los correos")
+	}
 }

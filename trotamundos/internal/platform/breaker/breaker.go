@@ -17,13 +17,14 @@ const (
 )
 
 type Breaker struct {
-	mu          sync.Mutex
-	failures    int
-	threshold   int
-	openFor     time.Duration
-	state       State
-	openedUntil time.Time
-	now         func() time.Time
+	mu            sync.Mutex
+	failures      int
+	threshold     int
+	openFor       time.Duration
+	state         State
+	openedUntil   time.Time
+	probeInFlight bool
+	now           func() time.Time
 }
 
 func New(threshold int, openFor time.Duration) *Breaker {
@@ -50,6 +51,12 @@ func (b *Breaker) Allow() error {
 	if b.state == Open {
 		return ErrOpen
 	}
+	if b.state == HalfOpen {
+		if b.probeInFlight {
+			return ErrOpen
+		}
+		b.probeInFlight = true
+	}
 	return nil
 }
 
@@ -59,6 +66,7 @@ func (b *Breaker) Success() {
 	b.failures = 0
 	b.state = Closed
 	b.openedUntil = time.Time{}
+	b.probeInFlight = false
 }
 
 func (b *Breaker) Failure() {
@@ -67,19 +75,26 @@ func (b *Breaker) Failure() {
 	if b.state == HalfOpen {
 		b.state = Open
 		b.openedUntil = b.now().Add(b.openFor)
+		b.probeInFlight = false
 		return
 	}
 	b.failures++
 	if b.failures >= b.threshold {
 		b.state = Open
 		b.openedUntil = b.now().Add(b.openFor)
+		b.probeInFlight = false
 	}
 }
 
 func (b *Breaker) refresh() {
 	if b.state == Open && !b.openedUntil.IsZero() && b.now().After(b.openedUntil) {
 		b.state = HalfOpen
+		b.probeInFlight = false
 	}
 }
 
-func (b *Breaker) SetNow(fn func() time.Time) { b.now = fn }
+func (b *Breaker) SetNow(fn func() time.Time) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.now = fn
+}

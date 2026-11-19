@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -175,27 +176,54 @@ func (h *Handler) Facts(w http.ResponseWriter, r *http.Request) {
 	httpx.JSON(w, http.StatusOK, map[string]any{"data": out})
 }
 
+const dateLayout = "2006-01-02"
+
 func rangeParams(r *http.Request) (time.Time, time.Time, error) {
 	to := time.Now().UTC()
 	from := to.AddDate(0, -3, 0)
 	if v := r.URL.Query().Get("to"); v != "" {
-		t, err := time.Parse(time.RFC3339, v)
+		t, err := parseRangeDate(v)
 		if err != nil {
-			return from, to, fmt.Errorf("parámetro 'to' inválido, se espera RFC3339")
+			return from, to, fmt.Errorf("parámetro 'to' inválido, se espera RFC3339 o YYYY-MM-DD")
 		}
 		to = t
 	}
 	if v := r.URL.Query().Get("from"); v != "" {
-		t, err := time.Parse(time.RFC3339, v)
+		t, err := parseRangeDate(v)
 		if err != nil {
-			return from, to, fmt.Errorf("parámetro 'from' inválido, se espera RFC3339")
+			return from, to, fmt.Errorf("parámetro 'from' inválido, se espera RFC3339 o YYYY-MM-DD")
 		}
 		from = t
 	}
+	from = startOfDay(from)
+	to = endOfDay(to)
 	if !from.Before(to) {
 		return from, to, fmt.Errorf("'from' debe ser anterior a 'to'")
 	}
 	return from, to, nil
+}
+
+// parseRangeDate acepta los formatos RFC3339 y date (YYYY-MM-DD) declarados
+// en OpenAPI, y siempre devuelve una fecha en UTC.
+func parseRangeDate(v string) (time.Time, error) {
+	v = strings.TrimSpace(v)
+	if t, err := time.Parse(time.RFC3339, v); err == nil {
+		return t.UTC(), nil
+	}
+	if t, err := time.Parse(dateLayout, v); err == nil {
+		return t.UTC(), nil
+	}
+	return time.Time{}, fmt.Errorf("formato de fecha inválido: %q", v)
+}
+
+func startOfDay(t time.Time) time.Time {
+	u := t.UTC()
+	return time.Date(u.Year(), u.Month(), u.Day(), 0, 0, 0, 0, time.UTC)
+}
+
+func endOfDay(t time.Time) time.Time {
+	u := t.UTC()
+	return time.Date(u.Year(), u.Month(), u.Day(), 23, 59, 59, 999000000, time.UTC)
 }
 
 func dateArg(t *time.Time) any {

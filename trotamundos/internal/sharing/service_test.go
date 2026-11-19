@@ -2,14 +2,20 @@ package sharing
 
 import (
 	"context"
+	"net/http"
+	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
+	"trotamundos/internal/auth"
 	"trotamundos/internal/domain"
+	"trotamundos/internal/platform/jwtx"
 )
 
 type fakeRepo struct {
-	shares []domain.TripShare
+	shares     []domain.TripShare
+	claimCalls int
 }
 
 func (f *fakeRepo) ListByTrip(_ context.Context, ownerUserID, tripID string) ([]domain.TripShare, error) {
@@ -39,6 +45,7 @@ func (f *fakeRepo) Revoke(_ context.Context, ownerUserID, shareID string, _ time
 }
 
 func (f *fakeRepo) ClaimInvitations(_ context.Context, userID, email string) error {
+	f.claimCalls++
 	for i := range f.shares {
 		if f.shares[i].GuestUserID == "" && f.shares[i].GuestEmail == email {
 			f.shares[i].GuestUserID = userID
@@ -94,7 +101,7 @@ func TestShareNormalizesEmailAndRejectsSelf(t *testing.T) {
 	}
 }
 
-func TestSharedWithMeClaimsAndRevoke(t *testing.T) {
+func TestSharedWithMeListsByEmailAndRevoke(t *testing.T) {
 	repo := &fakeRepo{}
 	svc := NewService(repo, &fakeTrips{trip: &domain.Trip{ID: "t1", UserID: "owner"}})
 	share, err := svc.Share(context.Background(), "owner", "", "t1", "guest@example.com")
@@ -114,5 +121,52 @@ func TestSharedWithMeClaimsAndRevoke(t *testing.T) {
 	out, _ = svc.SharedWithMe(context.Background(), "guest-id", "guest@example.com")
 	if len(out) != 0 {
 		t.Fatal("el viaje revocado no debe aparecer")
+	}
+}
+
+func TestSharedWithMeGETDoesNotClaimForeignInvitations(t *testing.T) {
+	repo := &fakeRepo{shares: []domain.TripShare{{
+		ID: "s1", TripID: "t1", OwnerUserID: "owner", GuestEmail: "guest@example.com",
+		GuestUserID: "other-user", CreatedAt: time.Now(),
+	}}}
+	svc := NewService(repo, &fakeTrips{trip: &domain.Trip{ID: "t1", UserID: "owner"}})
+
+	priv, pub, err := jwtx.Generate()
+	if err != nil {
+		t.Fatal(err)
+	}
+	signer := jwtx.NewSigner(priv, "test-issuer", time.Hour)
+	token, _, err := signer.Issue("guest-id", "guest@example.com", "user", time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	mux := http.NewServeMux()
+	authenticator := auth.NewAuthenticator(jwtx.NewVerifier(pub, "test-issuer"))
+	mux.Handle("GET /shared-with-me", authenticator.Require(http.HandlerFunc(NewHandler(svc).SharedWithMe)))
+
+	req := httptest.NewRequest(http.MethodGet, "/shared-with-me", nil)
+	req.Header.Set("Authorization", "Bearer "+token)
+	res := httptest.NewRecorder()
+	mux.ServeHTTP(res, req)
+
+	if res.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", res.Code, res.Body.String())
+	}
+	if !strings.Contains(res.Body.String(), "guest@example.com") {
+		t.Fatalf("el invite por email debe seguir visible: %s", res.Body.String())
+	}
+	if repo.claimCalls != 0 {
+		t.Fatalf("un GET no debe reclamar invitaciones (llamadas: %d)", repo.claimCalls)
+	}
+	if repo.shares[0].GuestUserID != "other-user" {
+		t.Fatalf("invitación ajena vinculada: %+v", repo.shares[0])
+	}
+
+	// La lectura individual tampoco debe reclamarla.
+	if _, err := svc.Get(context.Background(), "guest-id", "guest@example.com", "t1"); err != nil {
+		t.Fatalf("get compartido: %v", err)
+	}
+	if repo.claimCalls != 0 || repo.shares[0].GuestUserID != "other-user" {
+		t.Fatalf("claim en lectura individual: calls=%d share=%+v", repo.claimCalls, repo.shares[0])
 	}
 }

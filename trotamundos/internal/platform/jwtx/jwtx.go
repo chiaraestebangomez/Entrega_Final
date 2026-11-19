@@ -41,11 +41,12 @@ type Signer struct {
 }
 
 func NewSigner(private *rsa.PrivateKey, issuer string, ttl time.Duration) *Signer {
-	kid := ""
+	s := &Signer{private: private, issuer: issuer, ttl: ttl}
 	if private != nil {
-		kid = keyID(&private.PublicKey)
+		s.public = &private.PublicKey
+		s.kid = keyID(&private.PublicKey)
 	}
-	return &Signer{private: private, public: &private.PublicKey, issuer: issuer, ttl: ttl, kid: kid}
+	return s
 }
 
 func NewVerifier(public *rsa.PublicKey, issuer string) *Signer {
@@ -53,7 +54,7 @@ func NewVerifier(public *rsa.PublicKey, issuer string) *Signer {
 }
 
 func (s *Signer) Issue(userID, email, role string, now time.Time) (string, Claims, error) {
-	if s.private == nil {
+	if s == nil || s.private == nil {
 		return "", Claims{}, errors.New("jwtx: signer has no private key")
 	}
 	jti, err := randomID()
@@ -85,6 +86,9 @@ func (s *Signer) Issue(userID, email, role string, now time.Time) (string, Claim
 }
 
 func (s *Signer) Parse(token string, now time.Time) (Claims, error) {
+	if s == nil || s.public == nil {
+		return Claims{}, errors.New("jwtx: verifier has no public key")
+	}
 	parts := strings.Split(token, ".")
 	if len(parts) != 3 {
 		return Claims{}, ErrInvalidToken

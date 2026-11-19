@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"path"
+	"sort"
 	"sync"
 	"time"
 
@@ -22,6 +24,22 @@ type Cache interface {
 	Delete(ctx context.Context, keys ...string) error
 	AcquireLock(ctx context.Context, key, token string, ttl time.Duration) (bool, error)
 	ReleaseLock(ctx context.Context, key, token string) error
+}
+
+// Las interfaces de enumeración son opcionales: cualquier Cache que solo sepa
+// hacer Delete sigue siendo válido (los tests antiguos usan ese comportamiento).
+// Service.invalidate las detecta por type assertion para barrer todas las
+// versiones de una clave de resultados.
+type KeyLister interface {
+	Keys(ctx context.Context, pattern string) ([]string, error)
+}
+
+type PatternDeleter interface {
+	DeletePattern(ctx context.Context, pattern string) ([]string, error)
+}
+
+type PrefixDeleter interface {
+	DeleteByPrefix(ctx context.Context, prefix string) error
 }
 
 type RedisCache struct {
@@ -56,6 +74,30 @@ func (c *RedisCache) Set(ctx context.Context, key string, value any, ttl time.Du
 
 func (c *RedisCache) Delete(ctx context.Context, keys ...string) error {
 	return c.client.Delete(ctx, keys...)
+}
+
+// Keys usa SCAN + MATCH en Redis (nunca KEYS) para no bloquear el servidor.
+func (c *RedisCache) Keys(ctx context.Context, pattern string) ([]string, error) {
+	return c.client.Keys(ctx, pattern)
+}
+
+// DeletePattern borra todas las claves que coinciden con pattern y devuelve
+// las claves efectivamente enumeradas.
+func (c *RedisCache) DeletePattern(ctx context.Context, pattern string) ([]string, error) {
+	keys, err := c.Keys(ctx, pattern)
+	if err != nil || len(keys) == 0 {
+		return keys, err
+	}
+	if err := c.Delete(ctx, keys...); err != nil {
+		return nil, err
+	}
+	return keys, nil
+}
+
+// DeleteByPrefix es un atajo para borrar todas las claves bajo un prefijo.
+func (c *RedisCache) DeleteByPrefix(ctx context.Context, prefix string) error {
+	_, err := c.DeletePattern(ctx, prefix+"*")
+	return err
 }
 
 func (c *RedisCache) AcquireLock(ctx context.Context, key, token string, ttl time.Duration) (bool, error) {
@@ -121,6 +163,39 @@ func (c *MemoryCache) Delete(_ context.Context, keys ...string) error {
 		delete(c.values, key)
 	}
 	return nil
+}
+
+func (c *MemoryCache) Keys(_ context.Context, pattern string) ([]string, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	keys := []string{}
+	for key := range c.values {
+		matched, err := path.Match(pattern, key)
+		if err != nil {
+			return nil, err
+		}
+		if matched {
+			keys = append(keys, key)
+		}
+	}
+	sort.Strings(keys)
+	return keys, nil
+}
+
+func (c *MemoryCache) DeletePattern(ctx context.Context, pattern string) ([]string, error) {
+	keys, err := c.Keys(ctx, pattern)
+	if err != nil || len(keys) == 0 {
+		return keys, err
+	}
+	if err := c.Delete(ctx, keys...); err != nil {
+		return nil, err
+	}
+	return keys, nil
+}
+
+func (c *MemoryCache) DeleteByPrefix(ctx context.Context, prefix string) error {
+	_, err := c.DeletePattern(ctx, prefix+"*")
+	return err
 }
 
 func (c *MemoryCache) AcquireLock(_ context.Context, key, token string, ttl time.Duration) (bool, error) {

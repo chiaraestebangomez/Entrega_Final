@@ -44,6 +44,7 @@ type Post struct {
 type Service struct {
 	trips TripReader
 	mu    sync.Mutex
+	// Los posts viven sólo en memoria: el proveedor social es un mock.
 	posts []Post
 	now   func() time.Time
 }
@@ -69,22 +70,25 @@ func (s *Service) BuildPreview(ctx context.Context, userID, tripID, network stri
 	if err != nil {
 		return nil, err
 	}
+	// Reservations y Types se calculan sobre el mismo conjunto: reservas confirmadas.
 	types := map[string]int{}
 	confirmed := 0
 	for _, r := range trip.Reservations {
-		types[r.Type]++
-		if r.Status == domain.ReservationConfirmed {
-			confirmed++
+		if r.Status != domain.ReservationConfirmed {
+			continue
 		}
+		types[r.Type]++
+		confirmed++
 	}
 	text := summaryText(trip, confirmed)
 	return &Preview{
 		Network: strings.ToLower(strings.TrimSpace(network)), NetworkName: name, TripID: trip.ID,
 		Text: text, Destination: trip.Destination, StartDate: trip.StartDate, EndDate: trip.EndDate,
-		Reservations: confirmed, Types: types, ContainsPII: false,
+		Reservations: confirmed, Types: types, ContainsPII: textRevealsTripDetails(text, trip),
 	}, nil
 }
 
+// Publish persiste el post sólo en memoria porque el proveedor social es un mock.
 func (s *Service) Publish(ctx context.Context, userID, tripID, network string) (*Post, error) {
 	preview, err := s.BuildPreview(ctx, userID, tripID, network)
 	if err != nil {
@@ -106,6 +110,24 @@ func (s *Service) Posts() []Post {
 	out := make([]Post, len(s.posts))
 	copy(out, s.posts)
 	return out
+}
+
+// textRevealsTripDetails indica si el texto público expone el destino o las
+// fechas del viaje. Se calcula a partir del texto generado (no se fija a false):
+// ubicación y fechas se consideran datos sensibles aunque el resumen nunca
+// incluya nombres, correos ni localizadores de proveedor.
+func textRevealsTripDetails(text string, trip *domain.Trip) bool {
+	lower := strings.ToLower(text)
+	if destination := strings.TrimSpace(trip.Destination); destination != "" &&
+		strings.Contains(lower, strings.ToLower(destination)) {
+		return true
+	}
+	for _, date := range []*time.Time{trip.StartDate, trip.EndDate} {
+		if date != nil && strings.Contains(text, date.Format("02/01/2006")) {
+			return true
+		}
+	}
+	return false
 }
 
 func summaryText(trip *domain.Trip, confirmed int) string {

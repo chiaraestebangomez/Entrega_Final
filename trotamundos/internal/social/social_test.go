@@ -35,8 +35,12 @@ func TestPreviewOmitsSensitiveData(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if preview.ContainsPII {
-		t.Fatal("el resumen no debe contener PII")
+	// El texto incluye destino y fechas: el flag debe reflectjarlo.
+	if !preview.ContainsPII {
+		t.Fatal("el texto incluye destino/fechas: ContainsPII debe ser true")
+	}
+	if len(preview.Types) != 2 || preview.Types[domain.TypeFlight] != 1 || preview.Types[domain.TypeHotel] != 1 {
+		t.Fatalf("Types debe contar sólo reservas confirmadas: %+v", preview.Types)
 	}
 	for _, forbidden := range []string{"AR7X2K", "HT-9988", "Pérez", "user-1"} {
 		if strings.Contains(preview.Text, forbidden) {
@@ -48,6 +52,18 @@ func TestPreviewOmitsSensitiveData(t *testing.T) {
 	}
 	if preview.Reservations != 2 {
 		t.Fatalf("reservas confirmadas = %d", preview.Reservations)
+	}
+}
+
+func TestPreviewWithoutLocationOrDatesHasNoPII(t *testing.T) {
+	trip := &domain.Trip{ID: "trip-2", UserID: "user-1", Status: domain.TripActive}
+	svc := NewService(&fakeTrips{trip: trip})
+	preview, err := svc.BuildPreview(context.Background(), "user-1", "trip-2", "x")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if preview.ContainsPII {
+		t.Fatalf("sin destino ni fechas no debe marcarse PII: %s", preview.Text)
 	}
 }
 

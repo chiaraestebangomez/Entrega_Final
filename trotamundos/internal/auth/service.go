@@ -27,14 +27,27 @@ type TokenPair struct {
 type Service struct {
 	users      UserRepository
 	store      RefreshStore
+	revocation TokenRevocationStore
 	hasher     password.Hasher
 	tokens     *jwtx.Signer
 	refreshTTL time.Duration
 	now        func() time.Time
 }
 
-func NewService(users UserRepository, store RefreshStore, hasher password.Hasher, tokens *jwtx.Signer, refreshTTL time.Duration) *Service {
-	return &Service{users: users, store: store, hasher: hasher, tokens: tokens, refreshTTL: refreshTTL, now: time.Now}
+// NewService mantiene la firma original y acepta, opcionalmente, una denylist
+// de JTI. Si no se pasa una, se reutiliza el RefreshStore cuando implementa
+// TokenRevocationStore (es el caso de RedisRefreshStore y MemoryRefreshStore).
+func NewService(users UserRepository, store RefreshStore, hasher password.Hasher, tokens *jwtx.Signer, refreshTTL time.Duration, revocation ...TokenRevocationStore) *Service {
+	var rev TokenRevocationStore
+	if len(revocation) > 0 && revocation[0] != nil {
+		rev = revocation[0]
+	} else if candidate, ok := store.(TokenRevocationStore); ok {
+		rev = candidate
+	}
+	if rev == nil {
+		rev = NewMemoryRefreshStore()
+	}
+	return &Service{users: users, store: store, revocation: rev, hasher: hasher, tokens: tokens, refreshTTL: refreshTTL, now: time.Now}
 }
 
 func (s *Service) Register(ctx context.Context, email, fullName, rawPassword string) (*domain.User, *TokenPair, error) {
@@ -116,22 +129,61 @@ func (s *Service) Refresh(ctx context.Context, refreshToken string) (*domain.Use
 		}
 		return nil, nil, err
 	}
-	if err := s.store.Delete(ctx, key); err != nil {
-		return nil, nil, err
-	}
+	// Rotación atómica: el store comprueba que el refresh viejo siga vigente,
+	// persiste el nuevo y lo consume en una sola operación (script Lua en Redis,
+	// mutex en el store en memoria). Si dos peticiones usan el mismo refresh en
+	// paralelo, sólo la primera rota; la segunda obtiene ErrRefreshNotFound y se
+	// rechaza como no autorizada. El par nuevo no se persiste hasta que la
+	// rotación atómica confirma que el viejo estaba vigente.
 	pair, err := s.issue(ctx, u)
 	if err != nil {
+		return nil, nil, err
+	}
+	if err := s.store.Rotate(ctx, key, hashToken(pair.RefreshToken), u.ID, s.refreshTTL); err != nil {
+		if errors.Is(err, ErrRefreshNotFound) {
+			return nil, nil, domain.ErrUnauthorized
+		}
 		return nil, nil, err
 	}
 	return u, pair, nil
 }
 
-func (s *Service) Logout(ctx context.Context, refreshToken string) error {
+// Logout revoca el refresh token y, si se recibe un access token válido,
+// agrega su JTI a la denylist hasta su vencimiento. Un access token expirado
+// no necesita revocarse; uno inválido se ignora para no impedir el logout.
+func (s *Service) Logout(ctx context.Context, refreshToken, accessToken string) error {
+	var errs []error
+
 	refreshToken = strings.TrimSpace(refreshToken)
-	if refreshToken == "" {
-		return nil
+	if refreshToken != "" {
+		if err := s.store.Delete(ctx, hashToken(refreshToken)); err != nil {
+			errs = append(errs, err)
+		}
 	}
-	return s.store.Delete(ctx, hashToken(refreshToken))
+
+	accessToken = strings.TrimSpace(accessToken)
+	if accessToken != "" {
+		now := s.now()
+		claims, err := s.tokens.Parse(accessToken, now)
+		switch {
+		case err == nil:
+			if claims.JTI != "" {
+				ttl := time.Unix(claims.ExpiresAt, 0).Sub(now)
+				if ttl > 0 {
+					if err := s.revocation.RevokeJTI(ctx, claims.JTI, ttl); err != nil {
+						errs = append(errs, err)
+					}
+				}
+			}
+		case errors.Is(err, jwtx.ErrExpiredToken):
+			// El access token ya no es aceptable: no hace falta revocarlo.
+		default:
+			// Token malformado/con clave distinta: se ignora, pero el refresh
+			// (si vino) ya fue revocado arriba.
+		}
+	}
+
+	return errors.Join(errs...)
 }
 
 func (s *Service) ByID(ctx context.Context, id string) (*domain.User, error) {

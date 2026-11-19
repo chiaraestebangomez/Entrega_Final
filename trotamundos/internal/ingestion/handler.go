@@ -69,7 +69,15 @@ func (h *Handler) ScanMailbox(w http.ResponseWriter, r *http.Request) {
 
 func (h *Handler) ListEvents(w http.ResponseWriter, r *http.Request) {
 	p := auth.MustPrincipal(r.Context())
-	limit, _ := strconv.Atoi(r.URL.Query().Get("limit"))
+	limit := 0
+	if v := strings.TrimSpace(r.URL.Query().Get("limit")); v != "" {
+		n, err := strconv.Atoi(v)
+		if err != nil || n <= 0 {
+			httpx.Error(w, http.StatusBadRequest, "invalid_limit", "parámetro 'limit' inválido (debe ser > 0)")
+			return
+		}
+		limit = n
+	}
 	out, err := h.svc.ListEvents(r.Context(), p.UserID, limit)
 	if err != nil {
 		writeError(w, err)

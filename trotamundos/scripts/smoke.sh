@@ -7,18 +7,36 @@ TS="$(date +%s)${RANDOM}"
 TRAVELER="smoke+${TS}@example.com"
 GUEST="guest+${TS}@example.com"
 PASSWORD="secreto12345"
+RESP_FILE="${TMPDIR:-/tmp}/trotamundos-smoke-resp.json"
 START="$(date -u -d '+45 days' +%Y-%m-%dT08:00:00Z 2>/dev/null || date -u -v+45d +%Y-%m-%dT08:00:00Z)"
 END="$(date -u -d '+52 days' +%Y-%m-%dT18:00:00Z 2>/dev/null || date -u -v+52d +%Y-%m-%dT18:00:00Z)"
 LOCATOR="SMK${TS: -5}"
 
+# Ojo: con `python3 - <<'PY'` el heredoc ocupa stdin y el pipe con el JSON se
+# pierde. Guardamos el programa en una variable y usamos `python3 -c`.
+JGET_PY=$(cat <<'PY'
+import json, re, sys
+data = json.load(sys.stdin)
+path = sys.argv[1]
+tokens = re.findall(r"\[(?:'([^']*)'|\"([^\"]*)\"|(\d+))\]", path)
+for single, double, index in tokens:
+    data = data[single or double] if single or double else data[int(index)]
+if path.endswith(".__len__()"):
+    print(len(data))
+else:
+    print(data)
+PY
+)
+
 jget() {
-  python3 -c 'import json,sys; d=json.load(sys.stdin); print(eval("d"+sys.argv[1]))' "$1"
+  python3 -c "$JGET_PY" "$1"
 }
 
 api() {
   local method="$1" path="$2" token="${3:-}" body="${4:-}"
-  local args=(-sS -X "$method" "$BASE$path" -H "Content-Type: application/json")
+  local args=(-fsS -X "$method" "$BASE$path" -H "Content-Type: application/json")
   [[ -n "$token" ]] && args+=(-H "Authorization: Bearer $token")
+  [[ -n "${API_KEY:-}" ]] && args+=(-H "X-API-Key: $API_KEY")
   [[ -n "$body" ]] && args+=(-d "$body")
   curl "${args[@]}"
 }
@@ -56,15 +74,20 @@ echo "compartido con $GUEST"
 
 step "Vincular correo, agregar mensaje mock y escanear"
 api POST /mail/accounts "$TOKEN" '{"provider":"mock","email":"smoke@example.com","access_token":"mock-token","scopes":["mail.read"]}' >/dev/null
-curl -sS -X POST "$BASE/mock/mail/smoke@example.com/messages" \
+curl -fsS -XPOST "$BASE/mock/mail/smoke@example.com/messages" \
   -H "Content-Type: application/json" -H "X-Mock-Key: $MOCK_KEY" \
   -d "{\"from\":\"reservas@aerolineas.com\",\"subject\":\"Vuelo confirmado\",\"body\":\"Provider: aerolineas\\nLocator: $LOCATOR\\nType: flight\\nTitle: Vuelo Buenos Aires - Bariloche\\nDestination: Bariloche\\nStart: $START\\nEnd: $END\"}" >/dev/null
 ACCOUNT_ID=$(api GET /mail/accounts "$TOKEN" | jget "['data'][0]['id']")
 api POST "/mail/accounts/$ACCOUNT_ID/scan" "$TOKEN" >/dev/null
-sleep 4
-EVENTS=$(api GET /mail/events "$TOKEN")
-PROCESSED=$(printf '%s' "$EVENTS" | python3 -c 'import json,sys; d=json.load(sys.stdin)["data"]; print(sum(1 for e in d if e["status"] in ("processed","ignored")))')
+PROCESSED=0
+for _ in $(seq 1 30); do
+  EVENTS=$(api GET /mail/events "$TOKEN")
+  PROCESSED=$(printf '%s' "$EVENTS" | python3 -c 'import json,sys; d=json.load(sys.stdin)["data"]; print(sum(1 for e in d if e["status"] in ("processed","ignored")))')
+  [[ "$PROCESSED" -gt 0 ]] && break
+  sleep 1
+done
 echo "eventos de ingesta finalizados: $PROCESSED"
+[[ "$PROCESSED" -gt 0 ]]
 
 step "Agencia favorita, preferencias y recomendaciones"
 AGENCIES=$(api GET /agencies "$TOKEN")
@@ -92,18 +115,26 @@ else
 fi
 
 step "Sincronización mock de proveedor"
-curl -sS -X PUT "$BASE/mock/providers/mockhotel/reservations/$LOCATOR" \
+# Un run anterior pudo abortar con el proveedor caído; empezamos limpio.
+curl -fsS -XPOST "$BASE/mock/providers/mockhotel/fail" \
+  -H "Content-Type: application/json" -H "X-Mock-Key: $MOCK_KEY" \
+  -d '{"enabled":false}' >/dev/null
+curl -fsS -XPUT "$BASE/mock/providers/mockhotel/reservations/$LOCATOR" \
   -H "Content-Type: application/json" -H "X-Mock-Key: $MOCK_KEY" \
   -d "{\"type\":\"hotel\",\"title\":\"Hotel Smoke (actualizado)\",\"destination\":\"Bariloche\",\"start_at\":\"$START\",\"end_at\":\"$END\",\"status\":\"confirmed\",\"details\":{\"rooms\":2}}" >/dev/null
 api POST "/reservations/$RES_ID/sync" "$TOKEN" >/dev/null
 echo "reserva sincronizada desde proveedor mock"
-curl -sS -X POST "$BASE/mock/providers/mockhotel/fail" \
+curl -fsS -XPOST "$BASE/mock/providers/mockhotel/fail" \
   -H "Content-Type: application/json" -H "X-Mock-Key: $MOCK_KEY" \
   -d '{"enabled":true}' >/dev/null
-STALE=$(api POST "/reservations/$RES_ID/sync" "$TOKEN" | jget "['stale']")
-echo "reserva marcada stale ante caída del proveedor: $STALE"
+# Un sync fallido responde 502 con el snapshot stale; curl -f no aplica acá.
+STALE_CODE=$(curl -sS -o "$RESP_FILE" -w '%{http_code}' -X POST "$BASE/reservations/$RES_ID/sync" \
+  -H "Content-Type: application/json" -H "Authorization: Bearer $TOKEN" ${API_KEY:+-H "X-API-Key: $API_KEY"})
+[[ "$STALE_CODE" == "502" ]]
+STALE=$(jget "['stale']" < "$RESP_FILE")
+echo "reserva marcada stale ante caída del proveedor: $STALE (HTTP $STALE_CODE)"
 [[ "$STALE" == "True" ]]
-curl -sS -X POST "$BASE/mock/providers/mockhotel/fail" \
+curl -fsS -XPOST "$BASE/mock/providers/mockhotel/fail" \
   -H "Content-Type: application/json" -H "X-Mock-Key: $MOCK_KEY" \
   -d '{"enabled":false}' >/dev/null
 RECOVERED=$(api POST "/reservations/$RES_ID/sync" "$TOKEN" | jget "['stale']")
@@ -124,7 +155,9 @@ echo "viajes compartidos visibles para invitado: $SHARED_COUNT"
 api GET "/shared/$TRIP_ID" "$GUEST_TOKEN" >/dev/null
 
 step "Analítica (rol analyst)"
-ANALYST_TOKEN=$(api POST /auth/login "" '{"email":"analyst@trotamundos.dev","password":"analyst12345"}' | jget "['tokens']['access_token']")
+ANALYST_EMAIL="${SEED_ANALYST_EMAIL:-analyst@trotamundos.dev}"
+ANALYST_PASSWORD="${SEED_ANALYST_PASSWORD:-analyst12345}"
+ANALYST_TOKEN=$(api POST /auth/login "" "{\"email\":\"$ANALYST_EMAIL\",\"password\":\"$ANALYST_PASSWORD\"}" | jget "['tokens']['access_token']")
 SUMMARY=$(api GET /analytics/summary "$ANALYST_TOKEN")
 TOTAL=$(printf '%s' "$SUMMARY" | jget "['reservations']")
 echo "reservas anonimizadas en analítica: $TOTAL"

@@ -64,8 +64,8 @@ test-e2e:
 	@echo "=== 2. Levantando contenedores y esperando health checks ==="
 	$(COMPOSE) up --build -d --wait --wait-timeout $(HEALTH_TIMEOUT)
 	@echo "=== 3. Ejecutando tests ==="
-	-go test ./...
-	-./scripts/smoke.sh
+	go test ./...
+	./scripts/smoke.sh
 	@echo "=== 4. Borrando contenedores y volúmenes ==="
 	$(COMPOSE) down -v --remove-orphans
 

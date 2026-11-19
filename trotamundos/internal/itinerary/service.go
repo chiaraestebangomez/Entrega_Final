@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"reflect"
 	"strings"
 	"time"
@@ -18,15 +19,45 @@ type FactPublisher interface {
 	PublishReservation(ctx context.Context, res *domain.Reservation) error
 }
 
+// SyncError informa que la sincronización no llegó a completarse. La reserva
+// queda persistida como stale y se devuelve para que el transporte pueda
+// reportar el estado real sin presentar la operación como exitosa.
+type SyncError struct {
+	Err         error
+	Reservation *domain.Reservation
+}
+
+func (e *SyncError) Error() string {
+	return fmt.Sprintf("sincronización con proveedor fallida: %v", e.Err)
+}
+
+func (e *SyncError) Unwrap() error { return e.Err }
+
 type Service struct {
 	repo      Repository
 	providers *providers.Registry
 	facts     FactPublisher
 	now       func() time.Time
+	log       *slog.Logger
 }
 
 func NewService(repo Repository, providerRegistry *providers.Registry, facts FactPublisher) *Service {
-	return &Service{repo: repo, providers: providerRegistry, facts: facts, now: time.Now}
+	return &Service{repo: repo, providers: providerRegistry, facts: facts, now: time.Now, log: slog.Default()}
+}
+
+// WithLogger permite reemplazar el logger usado para efectos secundarios no críticos.
+func (s *Service) WithLogger(log *slog.Logger) *Service {
+	if log != nil {
+		s.log = log
+	}
+	return s
+}
+
+func (s *Service) logger() *slog.Logger {
+	if s.log == nil {
+		return slog.Default()
+	}
+	return s.log
 }
 
 type ReservationInput struct {
@@ -43,9 +74,8 @@ type ReservationInput struct {
 }
 
 func (s *Service) ListTrips(ctx context.Context, userID string, archived bool) ([]domain.Trip, error) {
-	if !archived {
-		_, _ = s.repo.ArchivePastTrips(ctx, s.now().UTC())
-	}
+	// El archivado de viajes pasados lo hace el worker (ArchivePastTrips);
+	// este método es de sólo lectura.
 	trips, err := s.repo.ListTrips(ctx, userID, archived)
 	if err != nil {
 		return nil, err
@@ -101,21 +131,40 @@ func (s *Service) UpdateReservation(ctx context.Context, userID, id string, in R
 	if err != nil {
 		return nil, err
 	}
-	updated, changed := mergeReservation(cur, normalizeInput(in), domain.SourceManual)
-	if in.TripID != "" && in.TripID != cur.TripID {
-		t, err := s.repo.GetTrip(ctx, userID, in.TripID)
+	// Los campos ausentes no deben reescribirse con valores por defecto.
+	in = normalizeProvidedInput(in)
+	updated, changed := mergeReservation(cur, in, domain.SourceManual)
+	oldTripID := cur.TripID
+	var targetTrip *domain.Trip
+	if in.TripID != "" && in.TripID != updated.TripID {
+		targetTrip, err = s.repo.GetTrip(ctx, userID, in.TripID)
 		if err != nil {
 			return nil, err
 		}
-		updated.TripID = t.ID
+		updated.TripID = targetTrip.ID
 		changed = appendUnique(changed, "trip_id")
+	}
+	// Validar el resultado final antes de cualquier escritura (incluido el reagrupamiento).
+	if err := validateReservation(&updated); err != nil {
+		return nil, err
 	}
 	if len(changed) == 0 {
 		return cur, nil
 	}
 	now := s.now().UTC()
 	updated.UpdatedAt = now
-	if !MatchesTrip(&domain.Trip{Destination: cur.Destination, StartDate: cur.StartAt, EndDate: cur.EndAt, Status: domain.TripActive}, updated.Destination, updated.StartAt, updated.EndAt) || updated.TripID == "" {
+
+	if targetTrip == nil && updated.TripID != "" {
+		targetTrip, err = s.repo.GetTrip(ctx, userID, updated.TripID)
+		if err != nil {
+			return nil, err
+		}
+	}
+	// El agrupamiento se evalúa con el destino y las fechas ya actualizados.
+	matches := targetTrip != nil && targetTrip.Status == domain.TripActive &&
+		(strings.TrimSpace(updated.Destination) == "" || SameDestination(targetTrip.Destination, updated.Destination)) &&
+		DatesCompatible(targetTrip.StartDate, targetTrip.EndDate, updated.StartAt, updated.EndAt, GroupWindowDays)
+	if !matches {
 		if err := s.regroup(ctx, userID, &updated); err != nil {
 			return nil, err
 		}
@@ -123,11 +172,25 @@ func (s *Service) UpdateReservation(ctx context.Context, userID, id string, in R
 	if err := s.repo.UpdateReservation(ctx, &updated); err != nil {
 		return nil, err
 	}
+	if updated.TripID != "" {
+		if err := s.repo.RefreshTripBounds(ctx, userID, updated.TripID); err != nil {
+			return nil, err
+		}
+	}
+	if oldTripID != "" && oldTripID != updated.TripID {
+		if err := s.repo.RefreshTripBounds(ctx, userID, oldTripID); err != nil {
+			return nil, err
+		}
+	}
 	if err := s.recordChange(ctx, cur, &updated, domain.SourceManual, changed); err != nil {
 		return nil, err
 	}
-	s.notify(ctx, userID, "reservation_updated", "Reserva actualizada", "Se actualizaron datos de "+displayTitle(&updated), "reservation", updated.ID)
-	s.publishFact(ctx, &updated)
+	if err := s.notify(ctx, userID, "reservation_updated", "Reserva actualizada", "Se actualizaron datos de "+displayTitle(&updated), "reservation", updated.ID); err != nil {
+		return nil, err
+	}
+	if err := s.publishFact(ctx, &updated); err != nil {
+		return nil, err
+	}
 	return &updated, nil
 }
 
@@ -198,10 +261,16 @@ func (s *Service) ApplyReservation(ctx context.Context, userID string, in Reserv
 		Current:       reservationToMap(res),
 		CreatedAt:     now,
 	}
-	_ = s.repo.AddChange(ctx, change)
-	s.notify(ctx, userID, "reservation_created", "Nueva reserva", displayTitle(res)+" se agregó a tu viaje a "+displayDestination(res), "reservation", res.ID)
+	if err := s.repo.AddChange(ctx, change); err != nil {
+		return nil, false, err
+	}
+	if err := s.notify(ctx, userID, "reservation_created", "Nueva reserva", displayTitle(res)+" se agregó a tu viaje a "+displayDestination(res), "reservation", res.ID); err != nil {
+		return nil, false, err
+	}
 	s.seedProvider(res)
-	s.publishFact(ctx, res)
+	if err := s.publishFact(ctx, res); err != nil {
+		return nil, false, err
+	}
 	return res, true, nil
 }
 
@@ -227,18 +296,24 @@ func (s *Service) updateFromInput(ctx context.Context, userID string, cur *domai
 		return nil, false, err
 	}
 	if updated.TripID != cur.TripID {
-		_ = s.repo.RefreshTripBounds(ctx, userID, updated.TripID)
+		if err := s.repo.RefreshTripBounds(ctx, userID, updated.TripID); err != nil {
+			return nil, false, err
+		}
 	}
 	if err := s.recordChange(ctx, cur, &updated, source, changed); err != nil {
 		return nil, false, err
 	}
 	if updated.Status == domain.ReservationCanceled && cur.Status != domain.ReservationCanceled {
-		s.notify(ctx, userID, "reservation_canceled", "Reserva cancelada", displayTitle(&updated)+" fue cancelada por el proveedor", "reservation", updated.ID)
-	} else {
-		s.notify(ctx, userID, "reservation_updated", "Reserva actualizada", "Cambios en "+displayTitle(&updated)+": "+strings.Join(changed, ", "), "reservation", updated.ID)
+		if err := s.notify(ctx, userID, "reservation_canceled", "Reserva cancelada", displayTitle(&updated)+" fue cancelada por el proveedor", "reservation", updated.ID); err != nil {
+			return nil, false, err
+		}
+	} else if err := s.notify(ctx, userID, "reservation_updated", "Reserva actualizada", "Cambios en "+displayTitle(&updated)+": "+strings.Join(changed, ", "), "reservation", updated.ID); err != nil {
+		return nil, false, err
 	}
 	s.seedProvider(&updated)
-	s.publishFact(ctx, &updated)
+	if err := s.publishFact(ctx, &updated); err != nil {
+		return nil, false, err
+	}
 	return &updated, true, nil
 }
 
@@ -257,10 +332,13 @@ func (s *Service) SyncReservation(ctx context.Context, userID, id string) (*doma
 	now := s.now().UTC()
 	snap, err := adapter.GetReservation(ctx, res.ProviderLocator)
 	if err != nil {
+		// Persistimos el estado stale pero la operación NO se reporta como exitosa.
 		res.Stale = true
 		res.UpdatedAt = now
-		_ = s.repo.UpdateReservation(ctx, res)
-		return res, nil
+		if updateErr := s.repo.UpdateReservation(ctx, res); updateErr != nil {
+			return nil, errors.Join(err, fmt.Errorf("persistir reserva stale: %w", updateErr))
+		}
+		return nil, &SyncError{Err: err, Reservation: res}
 	}
 	in := ReservationInput{
 		Type:            snap.Type,
@@ -293,21 +371,34 @@ func (s *Service) SyncReservation(ctx context.Context, userID, id string) (*doma
 	return updated, nil
 }
 
+// SyncDueReservations mantiene la firma usada por el worker de main.go: los
+// errores se registran en el log y se reflejan en el contador de fallidos.
 func (s *Service) SyncDueReservations(ctx context.Context, limit int) (int, int) {
+	ok, failed, err := s.SyncDueReservationsWithError(ctx, limit)
+	if err != nil {
+		s.logger().Error("provider sync batch", "error", err, "synced", ok, "failed", failed)
+	}
+	return ok, failed
+}
+
+// SyncDueReservationsWithError expone además el error agregado del lote.
+func (s *Service) SyncDueReservationsWithError(ctx context.Context, limit int) (int, int, error) {
 	reservations, err := s.repo.ListReservationsForSync(ctx, limit)
 	if err != nil {
-		return 0, 0
+		return 0, 0, fmt.Errorf("listar reservas para sincronizar: %w", err)
 	}
 	ok, failed := 0, 0
+	var errs []error
 	for i := range reservations {
 		res := reservations[i]
 		if _, err := s.SyncReservation(ctx, res.UserID, res.ID); err != nil {
 			failed++
+			errs = append(errs, fmt.Errorf("reserva %s: %w", res.ID, err))
 			continue
 		}
 		ok++
 	}
-	return ok, failed
+	return ok, failed, errors.Join(errs...)
 }
 
 func (s *Service) ArchivePastTrips(ctx context.Context) (int64, error) {
@@ -322,15 +413,43 @@ func (s *Service) ListChanges(ctx context.Context, userID, reservationID string)
 }
 
 func (s *Service) ListNotifications(ctx context.Context, userID string, limit int) ([]domain.Notification, error) {
-	return s.repo.ListNotifications(ctx, userID, limit)
+	return s.ListNotificationsPage(ctx, userID, limit, 0)
+}
+
+// ListNotificationsPage agrega paginación sin romper la firma existente ni la
+// interfaz Repository (los dobles de tests siguen implementando sólo limit).
+func (s *Service) ListNotificationsPage(ctx context.Context, userID string, limit, offset int) ([]domain.Notification, error) {
+	if paged, ok := s.repo.(interface {
+		ListNotificationsPage(context.Context, string, int, int) ([]domain.Notification, error)
+	}); ok {
+		return paged.ListNotificationsPage(ctx, userID, limit, offset)
+	}
+	if limit <= 0 || limit > 200 {
+		limit = 50
+	}
+	if offset < 0 {
+		offset = 0
+	}
+	all, err := s.repo.ListNotifications(ctx, userID, limit+offset)
+	if err != nil {
+		return nil, err
+	}
+	if offset >= len(all) {
+		return []domain.Notification{}, nil
+	}
+	end := offset + limit
+	if end > len(all) {
+		end = len(all)
+	}
+	return all[offset:end], nil
 }
 
 func (s *Service) MarkNotificationRead(ctx context.Context, userID, id string) error {
 	return s.repo.MarkNotificationRead(ctx, userID, id)
 }
 
-func (s *Service) RecordAudit(ctx context.Context, userID, action, resource, resourceID, ip string, details map[string]any) {
-	_ = s.repo.AddAudit(ctx, &domain.AuditLog{
+func (s *Service) RecordAudit(ctx context.Context, userID, action, resource, resourceID, ip string, details map[string]any) error {
+	return s.repo.AddAudit(ctx, &domain.AuditLog{
 		ID: idgen.UUID(), UserID: userID, Action: action, Resource: resource,
 		ResourceID: resourceID, IP: ip, Details: details, CreatedAt: s.now().UTC(),
 	})
@@ -441,17 +560,18 @@ func (s *Service) recordChange(ctx context.Context, before, after *domain.Reserv
 	})
 }
 
-func (s *Service) notify(ctx context.Context, userID, typ, title, body, resourceType, resourceID string) {
-	_ = s.repo.AddNotification(ctx, &domain.Notification{
+func (s *Service) notify(ctx context.Context, userID, typ, title, body, resourceType, resourceID string) error {
+	return s.repo.AddNotification(ctx, &domain.Notification{
 		ID: idgen.UUID(), UserID: userID, Type: typ, Title: title, Body: body,
 		ResourceType: resourceType, ResourceID: resourceID, CreatedAt: s.now().UTC(),
 	})
 }
 
-func (s *Service) publishFact(ctx context.Context, res *domain.Reservation) {
-	if s.facts != nil {
-		_ = s.facts.PublishReservation(ctx, res)
+func (s *Service) publishFact(ctx context.Context, res *domain.Reservation) error {
+	if s.facts == nil || res == nil {
+		return nil
 	}
+	return s.facts.PublishReservation(ctx, res)
 }
 
 func (s *Service) seedProvider(res *domain.Reservation) {
@@ -465,28 +585,43 @@ func (s *Service) seedProvider(res *domain.Reservation) {
 	})
 }
 
-func normalizeInput(in ReservationInput) ReservationInput {
+// normalizeProvidedInput sólo limpia los campos enviados: no inventa valores
+// por defecto, para que un PATCH pueda preservar los valores actuales.
+func normalizeProvidedInput(in ReservationInput) ReservationInput {
 	in.Type = strings.ToLower(strings.TrimSpace(in.Type))
-	if in.Type == "" {
-		in.Type = domain.TypeOther
-	}
 	in.Provider = strings.ToLower(strings.TrimSpace(in.Provider))
-	if in.Provider == "" {
-		in.Provider = domain.SourceManual
-	}
 	in.ProviderLocator = strings.TrimSpace(in.ProviderLocator)
 	in.Title = strings.TrimSpace(in.Title)
 	in.Destination = strings.TrimSpace(in.Destination)
 	in.Status = strings.ToLower(strings.TrimSpace(in.Status))
+	in.StartAt = cloneTime(in.StartAt)
+	in.EndAt = cloneTime(in.EndAt)
+	return in
+}
+
+func normalizeInput(in ReservationInput) ReservationInput {
+	in = normalizeProvidedInput(in)
+	if in.Type == "" {
+		in.Type = domain.TypeOther
+	}
+	if in.Provider == "" {
+		in.Provider = domain.SourceManual
+	}
 	if in.Status == "" {
 		in.Status = domain.ReservationConfirmed
 	}
 	if in.Details == nil {
 		in.Details = map[string]any{}
 	}
-	in.StartAt = cloneTime(in.StartAt)
-	in.EndAt = cloneTime(in.EndAt)
 	return in
+}
+
+func validateReservation(res *domain.Reservation) error {
+	return validateInput(ReservationInput{
+		Type: res.Type, Provider: res.Provider, ProviderLocator: res.ProviderLocator,
+		Title: res.Title, Destination: res.Destination, StartAt: res.StartAt,
+		EndAt: res.EndAt, Status: res.Status,
+	})
 }
 
 func validateInput(in ReservationInput) error {

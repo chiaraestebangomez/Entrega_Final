@@ -13,14 +13,25 @@ func dt(y int, m time.Month, d int) *time.Time {
 }
 
 func TestSameDestination(t *testing.T) {
-	if !SameDestination("Bariloche", "bariloche") {
-		t.Fatal("debe ignorar mayúsculas")
+	cases := []struct {
+		a, b string
+		want bool
+	}{
+		{"Bariloche", "bariloche", true},
+		{"  Bariloche  ", "BARILOCHE", true},
+		{"Córdoba", "Cordoba", true},
+		{"San Carlos de Bariloche", "Bariloche", true},
+		{"Bariloche", "Mendoza", false},
+		{"Bari", "Bariloche", false},
+		{"Bariloche Centro", "Centro", true},
+		{"", "Bariloche", false},
+		{"Bariloche", "", false},
+		{"", "", false},
 	}
-	if !SameDestination("San Carlos de Bariloche", "Bariloche") {
-		t.Fatal("debe aceptar destinos contenidos")
-	}
-	if SameDestination("Bariloche", "Mendoza") {
-		t.Fatal("destinos distintos no deben coincidir")
+	for _, c := range cases {
+		if got := SameDestination(c.a, c.b); got != c.want {
+			t.Errorf("SameDestination(%q,%q) = %v, want %v", c.a, c.b, got, c.want)
+		}
 	}
 }
 
@@ -50,6 +61,22 @@ func TestBestTripPicksClosest(t *testing.T) {
 	best := BestTrip(trips, "Bariloche", dt(2027, 1, 9), dt(2027, 1, 12))
 	if best == nil || best.ID != "near" {
 		t.Fatalf("mejor viaje = %+v", best)
+	}
+}
+
+func TestBestTripDeterministicWithoutDates(t *testing.T) {
+	trips := []domain.Trip{
+		{ID: "z", Destination: "Córdoba", Status: domain.TripActive},
+		{ID: "b", Destination: "Cordoba", Status: domain.TripActive},
+		{ID: "a", Destination: "CÓRDOBA", Status: domain.TripActive},
+		{ID: "0", Destination: "San Carlos de Córdoba", Status: domain.TripActive},
+	}
+	reversed := []domain.Trip{trips[3], trips[2], trips[1], trips[0]}
+	for i, order := range [][]domain.Trip{trips, reversed} {
+		best := BestTrip(order, "Cordoba", nil, nil)
+		if best == nil || best.ID != "a" {
+			t.Fatalf("orden %d: mejor viaje = %+v", i, best)
+		}
 	}
 }
 

@@ -17,6 +17,10 @@ var (
 	ErrAgencyUnavailable = errors.New("agency unavailable")
 	ErrAgencyOpen        = errors.New("agency circuit open")
 	ErrAgencyNotFound    = errors.New("agency not found")
+
+	// El circuito abierto de catálogo se distingue del de entrega: el primero
+	// equivale a "sin datos frescos" y no debe confundirse con un fallo de envío.
+	catalogOpenError = errors.New("agency catalog circuit open")
 )
 
 type AgencyCatalogStore interface {
@@ -80,52 +84,58 @@ func (a *agencyAdapter) SendRequest(_ context.Context, req domain.AgencyRequest)
 }
 
 type resilientAgencyAdapter struct {
-	inner   AgencyAdapter
-	breaker *breaker.Breaker
-	mu      sync.RWMutex
-	last    map[string]domain.AgencyCatalogResult
+	inner AgencyAdapter
+	// Un circuit breaker por operación: una falla de entrega no debe servir
+	// catálogo stale ni un fallo de catálogo debe bloquear las entregas.
+	catalogBreaker  *breaker.Breaker
+	deliveryBreaker *breaker.Breaker
+	mu              sync.RWMutex
+	last            map[string]domain.AgencyCatalogResult
 }
 
 func newResilientAgency(inner AgencyAdapter) *resilientAgencyAdapter {
 	return &resilientAgencyAdapter{
-		inner:   inner,
-		breaker: breaker.New(3, 15*time.Second),
-		last:    map[string]domain.AgencyCatalogResult{},
+		inner:           inner,
+		catalogBreaker:  breaker.New(3, 15*time.Second),
+		deliveryBreaker: breaker.New(3, 15*time.Second),
+		last:            map[string]domain.AgencyCatalogResult{},
 	}
 }
 
 func (a *resilientAgencyAdapter) Name() string { return a.inner.Name() }
 
 func (a *resilientAgencyAdapter) Catalog(ctx context.Context, agencyID string) (domain.AgencyCatalogResult, error) {
-	if err := a.breaker.Allow(); err != nil {
+	if err := a.catalogBreaker.Allow(); err != nil {
+		// Errores distintos permiten distinguir "sin snapshot" de "circuito abierto".
+		// Usamos un error propio para no confundir a los callers con fallos de entrega.
 		if stale, ok := a.cached(agencyID); ok {
 			return stale, nil
 		}
-		return domain.AgencyCatalogResult{}, ErrAgencyOpen
+		return domain.AgencyCatalogResult{}, catalogOpenError
 	}
 	result, err := a.inner.Catalog(ctx, agencyID)
 	if err != nil {
-		a.breaker.Failure()
+		a.catalogBreaker.Failure()
 		if stale, ok := a.cached(agencyID); ok {
 			return stale, nil
 		}
 		return domain.AgencyCatalogResult{}, err
 	}
-	a.breaker.Success()
+	a.catalogBreaker.Success()
 	a.remember(agencyID, result)
 	return result, nil
 }
 
 func (a *resilientAgencyAdapter) SendRequest(ctx context.Context, req domain.AgencyRequest) (domain.AgencyDelivery, error) {
-	if err := a.breaker.Allow(); err != nil {
+	if err := a.deliveryBreaker.Allow(); err != nil {
 		return domain.AgencyDelivery{}, ErrAgencyOpen
 	}
 	delivery, err := a.inner.SendRequest(ctx, req)
 	if err != nil {
-		a.breaker.Failure()
+		a.deliveryBreaker.Failure()
 		return domain.AgencyDelivery{}, err
 	}
-	a.breaker.Success()
+	a.deliveryBreaker.Success()
 	return delivery, nil
 }
 

@@ -16,6 +16,10 @@ type Repository interface {
 	ListByTrip(ctx context.Context, ownerUserID, tripID string) ([]domain.TripShare, error)
 	Create(ctx context.Context, share *domain.TripShare, now time.Time) error
 	Revoke(ctx context.Context, ownerUserID, shareID string, now time.Time) error
+	// ClaimInvitations se conserva por compatibilidad con repositorios que
+	// todavía respaldan invitaciones creadas antes de existiera el usuario.
+	// Deprecated: los accesos de lectura del Service ya no lo invocan; Create
+	// resuelve guest_user_id al compartir y las consultas filtran por email.
 	ClaimInvitations(ctx context.Context, userID, email string) error
 	ListSharedWithMe(ctx context.Context, userID, email string) ([]domain.TripShare, error)
 	GetGuestShare(ctx context.Context, tripID, userID, email string) (*domain.TripShare, error)
@@ -63,6 +67,8 @@ func (r *PostgresRepository) Revoke(ctx context.Context, ownerUserID, shareID st
 	return nil
 }
 
+// ClaimInvitations sigue disponible para migraciones, pero Service.SharedWithMe
+// y Service.Get no la llaman: un GET no debe reasignar invitaciones ajenas.
 func (r *PostgresRepository) ClaimInvitations(ctx context.Context, userID, email string) error {
 	_, err := r.pool.Exec(ctx, `UPDATE itinerary.trip_shares SET guest_user_id=$1
 		WHERE guest_user_id IS NULL AND lower(guest_email)=lower($2)`, userID, strings.TrimSpace(email))

@@ -2,6 +2,7 @@ package recommendation
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"testing"
 	"time"
@@ -10,13 +11,63 @@ import (
 	"trotamundos/internal/providers"
 )
 
+func TestTrainModelIncludesProfileAffinities(t *testing.T) {
+	candidates := FromCatalog(catalogItems())
+	model := TrainModel([]domain.AnonymizedSignal{{
+		UserBucket:         "bucket-a",
+		Destination:        "Bariloche",
+		RecommendationType: domain.RecoTypeRoute,
+		Action:             domain.FeedbackInterested,
+	}}, time.Now())
+	if _, ok := model.Affinities[profileAffinityKey("bucket-a", "Bariloche", domain.RecoTypeRoute)]; !ok {
+		t.Fatalf("falta afinidad por perfil: %+v", model.Affinities)
+	}
+	own := Rank(candidates, model, nil, nil, "bucket-a", map[string]bool{}, map[string]bool{})
+	other := Rank(candidates, model, nil, nil, "bucket-b", map[string]bool{}, map[string]bool{})
+	if len(own) == 0 || len(other) == 0 || own[0].ID != "r1" {
+		t.Fatalf("ranking perfil = %+v / global = %+v", own, other)
+	}
+}
+
+func TestColdStartUsesFavoriteAgencyCatalog(t *testing.T) {
+	ctx := context.Background()
+	store := newFakeStore()
+	agencies := newFakeAgencies()
+	// Sin batch ni snapshots en caché: debe reconstruirse desde el catálogo.
+	svc := testService(t, store, NewMemoryCache(), agencies, &fakeCatalog{items: catalogItems()})
+	recs, err := svc.Recommendations(ctx, "user-1")
+	if err != nil {
+		t.Fatalf("recomendaciones: %v", err)
+	}
+	if len(recs) != len(catalogItems()) {
+		t.Fatalf("cold start = %+v, esperaba %d recomendaciones", recs, len(catalogItems()))
+	}
+}
+
+func TestInfoRequestRecordsAnonymizedInquirySignal(t *testing.T) {
+	ctx := context.Background()
+	store := newFakeStore()
+	agencies := newFakeAgencies()
+	for _, item := range catalogItems() {
+		rec := FromCatalog([]domain.AgencyCatalogItem{item})[0]
+		agencies.recs[rec.ID] = &rec
+	}
+	svc := testService(t, store, NewMemoryCache(), agencies, &fakeCatalog{items: catalogItems()})
+	if _, err := svc.InfoRequest(ctx, "user-1", "r1", "¿Hay disponibilidad?"); err != nil {
+		t.Fatalf("consulta: %v", err)
+	}
+	if len(store.signals) != 1 || store.signals[0].Action != domain.FeedbackInquiry {
+		t.Fatalf("señal de consulta = %+v", store.signals)
+	}
+}
+
 func TestRankExcludesDiscardedAndOverBudget(t *testing.T) {
 	candidates := FromCatalog(catalogItems())
 	model := TrainModel([]domain.AnonymizedSignal{
 		{Destination: "Bariloche", RecommendationType: domain.RecoTypeRoute, Action: domain.FeedbackInterested},
 	}, time.Now())
 	prefs := &domain.RecommendationPreferences{MaxBudgetCents: 95000}
-	got := Rank(candidates, model, prefs, nil, map[string]bool{"r2": true}, map[string]bool{})
+	got := Rank(candidates, model, prefs, nil, "", map[string]bool{"r2": true}, map[string]bool{})
 	if len(got) != 1 || got[0].ID != "r3" {
 		t.Fatalf("rank = %+v", got)
 	}
@@ -29,7 +80,7 @@ func TestRankPrioritizesInterestedAndHistory(t *testing.T) {
 	candidates := FromCatalog(catalogItems())
 	model := domain.ModelSnapshot{Affinities: map[string]float64{}}
 	history := []domain.Trip{{Destination: "Mendoza", Reservations: []domain.Reservation{{Type: domain.RecoTypeLodging}}}}
-	got := Rank(candidates, model, nil, history, map[string]bool{}, map[string]bool{"r1": true})
+	got := Rank(candidates, model, nil, history, "", map[string]bool{}, map[string]bool{"r1": true})
 	if len(got) != 3 || got[0].ID != "r1" {
 		t.Fatalf("rank = %+v", got)
 	}
@@ -216,5 +267,60 @@ func TestUpdatePreferencesRejectsInvalidRange(t *testing.T) {
 	})
 	if !strings.Contains(err.Error(), "validation") {
 		t.Fatalf("err = %v", err)
+	}
+}
+
+func TestFeedbackRejectsRecommendationOutsideFavoriteAgency(t *testing.T) {
+	ctx := context.Background()
+	store := newFakeStore()
+	agencies := newFakeAgencies()
+	rec := FromCatalog([]domain.AgencyCatalogItem{catalogItems()[0]})[0]
+	agencies.recs[rec.ID] = &rec
+	svc := testService(t, store, NewMemoryCache(), agencies, &fakeCatalog{})
+
+	input := domain.RecommendationFeedback{RecommendationID: rec.ID, Action: domain.FeedbackDiscarded}
+	agencies.favorite = &domain.FavoriteAgency{AgencyID: "otra-agencia"}
+	if _, err := svc.Feedback(ctx, "user-1", rec.ID, input); !errors.Is(err, domain.ErrForbidden) {
+		t.Fatalf("agencia ajena: err = %v", err)
+	}
+	agencies.favorite = nil
+	if _, err := svc.Feedback(ctx, "user-1", rec.ID, input); !errors.Is(err, domain.ErrForbidden) {
+		t.Fatalf("sin favorita: err = %v", err)
+	}
+	if len(store.interactions) != 0 || len(store.signals) != 0 {
+		t.Fatalf("no se debió registrar feedback: %+v / %+v", store.interactions, store.signals)
+	}
+}
+
+func TestInvalidateRemovesAllResultCacheVersions(t *testing.T) {
+	ctx := context.Background()
+	cache := NewMemoryCache()
+	if err := cache.Set(ctx, snapshotKey, domain.ModelSnapshot{Version: "v7"}, time.Minute); err != nil {
+		t.Fatal(err)
+	}
+	svc := testService(t, newFakeStore(), cache, newFakeAgencies(), &fakeCatalog{})
+
+	current := svc.resultKey(ctx, "user-1")
+	legacy := resultPrefix + "user-1"
+	oldVersion := resultPrefix + "v1:user-1"
+	otherUser := resultPrefix + "v7:user-2"
+	for _, key := range []string{current, legacy, oldVersion, otherUser} {
+		if err := cache.Set(ctx, key, []domain.Recommendation{}, time.Minute); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	if _, err := svc.UpdatePreferences(ctx, "user-1", domain.RecommendationPreferences{}); err != nil {
+		t.Fatalf("update: %v", err)
+	}
+	for _, key := range []string{current, legacy, oldVersion} {
+		var out []domain.Recommendation
+		if err := cache.Get(ctx, key, &out); !errors.Is(err, ErrCacheMiss) {
+			t.Fatalf("clave %q no invalidada: %v", key, err)
+		}
+	}
+	var out []domain.Recommendation
+	if err := cache.Get(ctx, otherUser, &out); err != nil {
+		t.Fatalf("se borró la caché de otro usuario: %v", err)
 	}
 }

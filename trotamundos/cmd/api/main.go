@@ -18,9 +18,11 @@ import (
 	"trotamundos/internal/ingestion"
 	"trotamundos/internal/itinerary"
 	"trotamundos/internal/mailer"
+	"trotamundos/internal/platform/httpx"
 	"trotamundos/internal/platform/jwtx"
 	"trotamundos/internal/platform/password"
 	"trotamundos/internal/platform/pgxdb"
+	"trotamundos/internal/platform/ratelimit"
 	"trotamundos/internal/platform/redisx"
 	"trotamundos/internal/platform/secrets"
 	"trotamundos/internal/providers"
@@ -44,6 +46,7 @@ func run() error {
 	}
 	logger := newLogger(cfg.Env)
 	slog.SetDefault(logger)
+	httpx.ConfigureTrustedProxies(cfg.TrustedProxies)
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
@@ -127,8 +130,10 @@ func run() error {
 		},
 	)
 
+	limiter := ratelimit.NewRedisLimiter(redisClient, cfg.RateLimitPerMinute, cfg.RateLimitWindow)
+
 	router := api.NewRouter(api.Deps{
-		Authenticator:  auth.NewAuthenticator(signer),
+		Authenticator:  auth.NewAuthenticatorWithRevocation(signer, refreshStore),
 		Auth:           auth.NewHandler(authSvc),
 		Itinerary:      itinerary.NewHandler(itinSvc),
 		Ingestion:      ingestion.NewHandler(ingestionSvc, mailConnector, cfg.WebhookKey),
@@ -139,6 +144,9 @@ func run() error {
 		Analytics:      analytics.NewHandler(analyticsSvc),
 		Providers:      providers.NewHandler(providerStore),
 		MockKey:        cfg.MockControlKey,
+		APIKeys:        cfg.APIKeys,
+		WebAPIKey:      cfg.WebAPIKey,
+		RateLimiter:    limiter,
 		Logger:         logger,
 		AllowedOrigin:  cfg.AllowedOrigin,
 		Health: func(r *http.Request) error {

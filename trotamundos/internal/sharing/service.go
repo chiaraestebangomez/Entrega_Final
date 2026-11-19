@@ -63,10 +63,12 @@ func (s *Service) Revoke(ctx context.Context, ownerID, shareID string) error {
 	return s.repo.Revoke(ctx, ownerID, shareID, s.now().UTC())
 }
 
+// SharedWithMe solo consulta. No se reclaman invitaciones en una lectura:
+// Share/Create ya guarda guest_user_id cuando el invitado existe, y
+// ListSharedWithMe filtra por (guest_user_id = usuario OR email = email).
+// Llamar a ClaimInvitations aquí permitiría que un GET vinculara invitaciones
+// ajenas (por ejemplo, un share ya asignado a otro usuario con el mismo email).
 func (s *Service) SharedWithMe(ctx context.Context, userID, email string) ([]SharedTrip, error) {
-	if err := s.repo.ClaimInvitations(ctx, userID, email); err != nil {
-		return nil, err
-	}
 	shares, err := s.repo.ListSharedWithMe(ctx, userID, email)
 	if err != nil {
 		return nil, err
@@ -82,10 +84,10 @@ func (s *Service) SharedWithMe(ctx context.Context, userID, email string) ([]Sha
 	return out, nil
 }
 
+// Get tampoco reclama invitaciones: GetGuestShare ya filtra por
+// (guest_user_id = usuario OR email = email), de modo que la lectura no
+// modifica la propiedad de un share creado para otra cuenta.
 func (s *Service) Get(ctx context.Context, userID, email, tripID string) (*SharedTrip, error) {
-	if err := s.repo.ClaimInvitations(ctx, userID, email); err != nil {
-		return nil, err
-	}
 	sh, err := s.repo.GetGuestShare(ctx, tripID, userID, email)
 	if err != nil {
 		return nil, err

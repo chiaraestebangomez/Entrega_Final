@@ -1,8 +1,10 @@
 package api
 
 import (
+	"crypto/subtle"
 	"log/slog"
 	"net/http"
+	"strings"
 
 	"trotamundos/internal/agencies"
 	"trotamundos/internal/analytics"
@@ -29,6 +31,9 @@ type Deps struct {
 	Analytics      *analytics.Handler
 	Providers      *providers.Handler
 	MockKey        string
+	APIKeys        []string
+	WebAPIKey      string
+	RateLimiter    httpx.RateLimiter
 	Health         func(r *http.Request) error
 	Logger         *slog.Logger
 	AllowedOrigin  string
@@ -105,9 +110,9 @@ func NewRouter(d Deps) http.Handler {
 	mux.HandleFunc("POST /mock/agencies/{id}/fail", requireKey(d.MockKey, d.Providers.AgencyFail))
 
 	mux.Handle("GET /agencies", guard(d.Recommendation.Agencies))
-	mux.Handle("GET /agencies/favorite", guard(d.Agencies.GetFavorite))
-	mux.Handle("PUT /agencies/favorite", guard(d.Agencies.SetFavorite))
-	mux.Handle("DELETE /agencies/favorite", guard(d.Agencies.DeleteFavorite))
+	mux.Handle("GET /agencies/favorite", guard(d.Recommendation.Favorite))
+	mux.Handle("PUT /agencies/favorite", guard(d.Recommendation.SetFavorite))
+	mux.Handle("DELETE /agencies/favorite", guard(d.Recommendation.DeleteFavorite))
 	mux.Handle("GET /me/favorite-agency", guard(d.Recommendation.Favorite))
 	mux.Handle("PUT /me/favorite-agency", guard(d.Recommendation.SetFavorite))
 	mux.Handle("DELETE /me/favorite-agency", guard(d.Recommendation.DeleteFavorite))
@@ -116,8 +121,8 @@ func NewRouter(d Deps) http.Handler {
 	mux.Handle("GET /recommendations", guard(d.Recommendation.Recommendations))
 	mux.Handle("POST /recommendations/{id}/feedback", guard(d.Recommendation.Feedback))
 	mux.Handle("POST /recommendations/{id}/info-request", guard(d.Recommendation.InfoRequest))
-	mux.Handle("POST /recommendations/{id}/discard", guard(d.Agencies.Discard))
-	mux.Handle("POST /recommendations/{id}/inquire", guard(d.Agencies.Inquire))
+	mux.Handle("POST /recommendations/{id}/discard", guard(d.Recommendation.Discard))
+	mux.Handle("POST /recommendations/{id}/inquire", guard(d.Recommendation.Inquire))
 	mux.Handle("GET /agency-requests", guard(d.Agencies.ListRequests))
 	mux.Handle("POST /agency-requests", guard(d.Recommendation.CreateAgencyRequest))
 	mux.Handle("GET /agency-requests/{id}", guard(d.Recommendation.GetRequest))
@@ -128,18 +133,68 @@ func NewRouter(d Deps) http.Handler {
 	mux.Handle("GET /analytics/facts", analyst(d.Analytics.Facts))
 
 	mux.Handle("GET /assets/", web.Assets())
+	mux.Handle("GET /api-config.js", web.Config(d.WebAPIKey))
 	mux.HandleFunc("GET /", web.Index)
 
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		httpx.Error(w, http.StatusNotFound, "not_found", "endpoint no encontrado")
 	})
 
-	return httpx.Chain(mux,
+	handler := httpx.Chain(mux,
+		httpx.Recover(d.Logger),
 		httpx.RequestID,
 		httpx.Logger(d.Logger),
-		httpx.Recover(d.Logger),
 		httpx.CORS(d.AllowedOrigin),
 	)
+	handler = withAPIKey(d.APIKeys, handler)
+	handler = withRateLimit(d.RateLimiter, handler)
+	return handler
+}
+
+// withAPIKey aplica CON-01: cuando hay claves configuradas, los controladores
+// exigen X-API-Key además del JWT. En desarrollo la lista puede estar vacía.
+func withAPIKey(keys []string, next http.Handler) http.Handler {
+	if len(keys) == 0 {
+		return next
+	}
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if isPublicRoute(r) {
+			next.ServeHTTP(w, r)
+			return
+		}
+		presented := strings.TrimSpace(r.Header.Get("X-API-Key"))
+		for _, key := range keys {
+			if subtle.ConstantTimeCompare([]byte(presented), []byte(key)) == 1 {
+				next.ServeHTTP(w, r)
+				return
+			}
+		}
+		httpx.Error(w, http.StatusUnauthorized, "invalid_api_key", "API key inválida")
+	})
+}
+
+func withRateLimit(limiter httpx.RateLimiter, next http.Handler) http.Handler {
+	if limiter == nil {
+		return next
+	}
+	limited := httpx.RateLimit(limiter, func(r *http.Request) string {
+		return httpx.ClientIP(r) + "|" + r.Method + " " + r.URL.Path
+	}, next)
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if isPublicRoute(r) {
+			next.ServeHTTP(w, r)
+			return
+		}
+		limited.ServeHTTP(w, r)
+	})
+}
+
+func isPublicRoute(r *http.Request) bool {
+	p := r.URL.Path
+	return p == "/healthz" || p == "/readyz" || p == "/" || p == "/api-config.js" ||
+		strings.HasPrefix(p, "/assets/") || strings.HasPrefix(p, "/mock/") ||
+		p == "/webhooks/mail" || p == "/social/networks" ||
+		strings.HasPrefix(p, "/auth/")
 }
 
 func requireKey(key string, next http.HandlerFunc) http.HandlerFunc {

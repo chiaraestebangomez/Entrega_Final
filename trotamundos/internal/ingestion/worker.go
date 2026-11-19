@@ -8,6 +8,9 @@ import (
 	"trotamundos/internal/domain"
 )
 
+// DefaultMaxRetries es la cantidad de intentos antes de marcar un evento en error.
+const DefaultMaxRetries = 5
+
 type Worker struct {
 	svc        *Service
 	repo       Repository
@@ -24,7 +27,14 @@ func NewWorker(svc *Service, repo Repository, log *slog.Logger, poll, staleAfter
 	if staleAfter <= 0 {
 		staleAfter = 2 * time.Minute
 	}
-	return &Worker{svc: svc, repo: repo, log: log, poll: poll, staleAfter: staleAfter, maxRetries: 5}
+	return &Worker{svc: svc, repo: repo, log: log, poll: poll, staleAfter: staleAfter, maxRetries: DefaultMaxRetries}
+}
+
+// SetMaxRetries permite ajustar la política de reintentos sin cambiar NewWorker.
+func (w *Worker) SetMaxRetries(maxRetries int) {
+	if maxRetries > 0 {
+		w.maxRetries = maxRetries
+	}
 }
 
 func (w *Worker) Run(ctx context.Context) {
@@ -61,7 +71,9 @@ func (w *Worker) tick(ctx context.Context) {
 			if ev.Attempts >= w.maxRetries {
 				status = domain.EventError
 			}
-			_ = w.repo.MarkError(ctx, ev.ID, status, next, err.Error())
+			if markErr := w.repo.MarkError(ctx, ev.ID, status, next, err.Error()); markErr != nil {
+				w.log.Error("mark ingestion event as failed", "event_id", ev.ID, "error", markErr)
+			}
 			w.log.Warn("ingestion event failed", "event_id", ev.ID, "attempts", ev.Attempts, "status", status, "error", err)
 			continue
 		}

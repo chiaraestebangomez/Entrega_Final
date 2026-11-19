@@ -69,8 +69,14 @@ func (h *Handler) Logout(w http.ResponseWriter, r *http.Request) {
 	var body struct {
 		RefreshToken string `json:"refresh_token"`
 	}
-	_ = httpx.Decode(r, &body)
-	if err := h.svc.Logout(r.Context(), body.RefreshToken); err != nil {
+	// httpx.Decode ya tolera el body vacío y devuelve nil; un JSON malformado
+	// sí devuelve error y debe responder 400 en lugar de ignorarse.
+	if err := httpx.Decode(r, &body); err != nil {
+		httpx.Error(w, http.StatusBadRequest, "invalid_body", "cuerpo JSON inválido")
+		return
+	}
+	accessToken := bearerFromHeader(r.Header.Get("Authorization"))
+	if err := h.svc.Logout(r.Context(), body.RefreshToken, accessToken); err != nil {
 		httpx.Error(w, http.StatusInternalServerError, "internal_error", "no se pudo cerrar la sesión")
 		return
 	}

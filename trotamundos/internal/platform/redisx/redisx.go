@@ -67,6 +67,54 @@ func (c *Client) Delete(ctx context.Context, keys ...string) error {
 	return err
 }
 
+// Eval ejecuta un script Lua de forma atómica en Redis. Se usa para operaciones
+// que deben ser indivisibles, como la rotación de refresh tokens (consume el
+// viejo y persiste el nuevo en un solo paso).
+func (c *Client) Eval(ctx context.Context, script string, numKeys int, args ...any) (any, error) {
+	cmd := make([]any, 0, 3+len(args))
+	cmd = append(cmd, "EVAL", script, numKeys)
+	cmd = append(cmd, args...)
+	return c.Do(ctx, cmd...)
+}
+
+// Keys devuelve las claves que coinciden con pattern usando SCAN + MATCH.
+// A diferencia de KEYS, no bloquea el servidor: recorre el espacio de claves
+// en lotes y respeta el deadline del contexto a través de Do.
+func (c *Client) Keys(ctx context.Context, pattern string) ([]string, error) {
+	const count = 100
+	cursor := "0"
+	keys := []string{}
+	for {
+		reply, err := c.Do(ctx, "SCAN", cursor, "MATCH", pattern, "COUNT", count)
+		if err != nil {
+			return nil, err
+		}
+		parts, ok := reply.([]any)
+		if !ok || len(parts) != 2 {
+			return nil, fmt.Errorf("redis: respuesta SCAN inesperada: %T", reply)
+		}
+		next, ok := parts[0].(string)
+		if !ok {
+			return nil, fmt.Errorf("redis: cursor SCAN inesperado: %T", parts[0])
+		}
+		batch, ok := parts[1].([]any)
+		if !ok {
+			return nil, fmt.Errorf("redis: lote SCAN inesperado: %T", parts[1])
+		}
+		for _, item := range batch {
+			key, ok := item.(string)
+			if !ok {
+				return nil, fmt.Errorf("redis: clave SCAN inesperada: %T", item)
+			}
+			keys = append(keys, key)
+		}
+		if next == "0" || next == cursor {
+			return keys, nil
+		}
+		cursor = next
+	}
+}
+
 func (c *Client) Close() error {
 	c.mu.Lock()
 	defer c.mu.Unlock()

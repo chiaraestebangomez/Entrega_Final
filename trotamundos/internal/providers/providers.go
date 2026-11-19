@@ -54,14 +54,12 @@ func key(provider, locator string) string {
 	return strings.ToLower(strings.TrimSpace(provider)) + "|" + strings.TrimSpace(locator)
 }
 
+// Seed sobrescribe el snapshot previo: el mock controla el estado actual del
+// proveedor, no un valor inmutable inicial.
 func (s *MockStore) Seed(provider, locator string, snap Snapshot) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	k := key(provider, locator)
-	if _, exists := s.snapshots[k]; exists {
-		return
-	}
-	s.snapshots[k] = snap
+	s.snapshots[key(provider, locator)] = snap
 }
 
 func (s *MockStore) Set(provider, locator string, snap Snapshot) {
@@ -187,15 +185,21 @@ func (r *Registry) Cached(provider, locator string) (Snapshot, bool) {
 }
 
 type resilientAdapter struct {
-	inner   Adapter
-	breaker *breaker.Breaker
-	sleep   func(context.Context, time.Duration)
+	inner Adapter
+	// Un breaker por operación, para que fallos de una no afecten a las demás.
+	mu       sync.Mutex
+	breakers map[string]*breaker.Breaker
+	sleep    func(context.Context, time.Duration)
 }
+
+const providerGetReservationOp = "get_reservation"
 
 func newResilient(name string, inner Adapter) *resilientAdapter {
 	return &resilientAdapter{
-		inner:   inner,
-		breaker: breaker.New(3, 15*time.Second),
+		inner: inner,
+		breakers: map[string]*breaker.Breaker{
+			providerGetReservationOp: breaker.New(3, 15*time.Second),
+		},
 		sleep: func(ctx context.Context, d time.Duration) {
 			t := time.NewTimer(d)
 			defer t.Stop()
@@ -207,10 +211,22 @@ func newResilient(name string, inner Adapter) *resilientAdapter {
 	}
 }
 
+func (a *resilientAdapter) breakerFor(operation string) *breaker.Breaker {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	b, ok := a.breakers[operation]
+	if !ok {
+		b = breaker.New(3, 15*time.Second)
+		a.breakers[operation] = b
+	}
+	return b
+}
+
 func (a *resilientAdapter) Name() string { return a.inner.Name() }
 
 func (a *resilientAdapter) GetReservation(ctx context.Context, locator string) (Snapshot, error) {
-	if err := a.breaker.Allow(); err != nil {
+	cb := a.breakerFor(providerGetReservationOp)
+	if err := cb.Allow(); err != nil {
 		return Snapshot{}, ErrOpen
 	}
 	backoff := 100 * time.Millisecond
@@ -225,15 +241,15 @@ func (a *resilientAdapter) GetReservation(ctx context.Context, locator string) (
 		}
 		snap, err := a.inner.GetReservation(ctx, locator)
 		if err == nil {
-			a.breaker.Success()
+			cb.Success()
 			return snap, nil
 		}
 		if errors.Is(err, ErrNotFound) {
-			a.breaker.Success()
+			cb.Success()
 			return Snapshot{}, err
 		}
 		lastErr = err
 	}
-	a.breaker.Failure()
+	cb.Failure()
 	return Snapshot{}, fmt.Errorf("%w: %v", ErrUnavailable, lastErr)
 }

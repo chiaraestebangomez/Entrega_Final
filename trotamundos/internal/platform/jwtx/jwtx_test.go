@@ -54,3 +54,20 @@ func TestParseRejectsTamperedToken(t *testing.T) {
 		t.Fatalf("esperaba ErrInvalidToken, obtuve %v", err)
 	}
 }
+
+func TestSignerWithoutKeysDoesNotPanic(t *testing.T) {
+	now := time.Now().UTC()
+	signer := NewSigner(nil, "iss", time.Minute)
+	if signer.public != nil {
+		t.Fatal("public debe ser nil cuando private es nil")
+	}
+	if _, _, err := signer.Issue("u", "e@x.com", "traveler", now); err == nil {
+		t.Fatal("Issue sin clave privada debe devolver error")
+	}
+	if _, err := signer.Parse("a.b.c", now); err == nil {
+		t.Fatal("Parse sin clave pública debe devolver error")
+	}
+	if _, err := NewVerifier(nil, "iss").Parse("a.b.c", now); err == nil {
+		t.Fatal("Parse de un verifier sin clave pública debe devolver error")
+	}
+}

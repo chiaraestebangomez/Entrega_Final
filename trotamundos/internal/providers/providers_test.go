@@ -28,6 +28,16 @@ func TestMockRegistryReturnsSeededSnapshot(t *testing.T) {
 	}
 }
 
+func TestMockStoreSeedOverwritesExistingSnapshot(t *testing.T) {
+	store := NewMockStore()
+	store.Seed("hotel", "HT1", Snapshot{Title: "original"})
+	store.Seed("hotel", "HT1", Snapshot{Title: "actualizado"})
+	snap, ok := store.Get("hotel", "HT1")
+	if !ok || snap.Title != "actualizado" {
+		t.Fatalf("snapshot = %+v, ok=%v", snap, ok)
+	}
+}
+
 func TestMockAdapterNotFoundAndCancel(t *testing.T) {
 	store := NewMockStore()
 	reg := NewMockRegistry(store)

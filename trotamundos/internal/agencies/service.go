@@ -37,6 +37,8 @@ func (s *Service) Favorite(ctx context.Context, userID string) (*domain.Favorite
 	return f, err
 }
 
+// Deprecated: usar recommendation.Service.SetFavorite, que además invalida la
+// caché de recomendaciones del usuario. Se conserva por compatibilidad con tests.
 func (s *Service) SetFavorite(ctx context.Context, userID, agencyID string) (*domain.FavoriteAgency, error) {
 	agencyID = strings.TrimSpace(agencyID)
 	if agencyID == "" {
@@ -55,6 +57,8 @@ func (s *Service) SetFavorite(ctx context.Context, userID, agencyID string) (*do
 	return s.repo.GetFavorite(ctx, userID)
 }
 
+// Deprecated: usar recommendation.Service.DeleteFavorite, que además invalida
+// la caché de recomendaciones del usuario. Se conserva por compatibilidad con tests.
 func (s *Service) DeleteFavorite(ctx context.Context, userID string, confirm bool) error {
 	if !confirm {
 		return fmt.Errorf("%w: se requiere confirmación para quitar la agencia favorita", domain.ErrValidation)
@@ -83,6 +87,9 @@ func (s *Service) Recommendations(ctx context.Context, userID string) ([]domain.
 	return s.repo.ListRecommendations(ctx, userID)
 }
 
+// Deprecated: usar recommendation.Service.Feedback con FeedbackDiscarded (o
+// recommendation.Handler.Discard), que valida la agencia favorita, registra la
+// señal anonimizada y actualiza la caché. Se conserva por compatibilidad con tests.
 func (s *Service) Discard(ctx context.Context, userID, recommendationID string) error {
 	if _, err := s.assertRecommendation(ctx, userID, recommendationID); err != nil {
 		return err
@@ -90,6 +97,9 @@ func (s *Service) Discard(ctx context.Context, userID, recommendationID string) 
 	return s.repo.RecordResponse(ctx, userID, recommendationID, "discarded")
 }
 
+// Deprecated: usar recommendation.Service.InfoRequest (o
+// recommendation.Handler.Inquire), que delega la entrega al adaptador de la
+// agencia y registra el estado de entrega. Se conserva por compatibilidad con tests.
 func (s *Service) Inquire(ctx context.Context, userID, recommendationID, message string) (*domain.AgencyRequest, error) {
 	rec, err := s.assertRecommendation(ctx, userID, recommendationID)
 	if err != nil {

@@ -124,6 +124,7 @@ func (r *PostgresRepository) DeleteTrip(ctx context.Context, userID, tripID stri
 }
 
 func (r *PostgresRepository) RefreshTripBounds(ctx context.Context, userID, tripID string) error {
+	// Sin reservas con fechas, min/max son NULL y limpiamos los límites del viaje.
 	const q = `UPDATE itinerary.trips t
 		SET start_date = s.min_start::date, end_date = s.max_end::date, updated_at = now()
 		FROM (
@@ -131,7 +132,7 @@ func (r *PostgresRepository) RefreshTripBounds(ctx context.Context, userID, trip
 			FROM itinerary.reservations
 			WHERE user_id=$1 AND trip_id=$2 AND start_at IS NOT NULL
 		) s
-		WHERE t.id=$2 AND t.user_id=$1 AND s.min_start IS NOT NULL`
+		WHERE t.id=$2 AND t.user_id=$1`
 	_, err := r.pool.Exec(ctx, q, userID, tripID)
 	return err
 }
@@ -288,12 +289,20 @@ func (r *PostgresRepository) AddNotification(ctx context.Context, n *domain.Noti
 }
 
 func (r *PostgresRepository) ListNotifications(ctx context.Context, userID string, limit int) ([]domain.Notification, error) {
+	return r.ListNotificationsPage(ctx, userID, limit, 0)
+}
+
+// ListNotificationsPage implementa la paginación opcional usada por el handler.
+func (r *PostgresRepository) ListNotificationsPage(ctx context.Context, userID string, limit, offset int) ([]domain.Notification, error) {
 	if limit <= 0 || limit > 200 {
 		limit = 50
 	}
+	if offset < 0 {
+		offset = 0
+	}
 	const q = `SELECT id, user_id, notification_type, title, body, resource_type, resource_id, read_at, created_at
-		FROM itinerary.notifications WHERE user_id=$1 ORDER BY created_at DESC LIMIT $2`
-	rows, err := r.pool.Query(ctx, q, userID, limit)
+		FROM itinerary.notifications WHERE user_id=$1 ORDER BY created_at DESC LIMIT $2 OFFSET $3`
+	rows, err := r.pool.Query(ctx, q, userID, limit, offset)
 	if err != nil {
 		return nil, err
 	}

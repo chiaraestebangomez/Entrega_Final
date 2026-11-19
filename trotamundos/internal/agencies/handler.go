@@ -36,6 +36,8 @@ func (h *Handler) GetFavorite(w http.ResponseWriter, r *http.Request) {
 	httpx.JSON(w, http.StatusOK, map[string]any{"favorite": f})
 }
 
+// Deprecated: usar recommendation.Handler.SetFavorite (PUT /me/favorite-agency),
+// que invalida la caché. Se conserva por compatibilidad con tests.
 func (h *Handler) SetFavorite(w http.ResponseWriter, r *http.Request) {
 	p := auth.MustPrincipal(r.Context())
 	var body struct {
@@ -53,6 +55,8 @@ func (h *Handler) SetFavorite(w http.ResponseWriter, r *http.Request) {
 	httpx.JSON(w, http.StatusOK, f)
 }
 
+// Deprecated: usar recommendation.Handler.DeleteFavorite
+// (DELETE /me/favorite-agency), que invalida la caché. Se conserva por tests.
 func (h *Handler) DeleteFavorite(w http.ResponseWriter, r *http.Request) {
 	p := auth.MustPrincipal(r.Context())
 	confirm := r.URL.Query().Get("confirm") == "true"
@@ -73,6 +77,8 @@ func (h *Handler) ListRecommendations(w http.ResponseWriter, r *http.Request) {
 	httpx.JSON(w, http.StatusOK, map[string]any{"data": out})
 }
 
+// Deprecated: usar recommendation.Handler.Discard
+// (POST /recommendations/{id}/discard). Se conserva por compatibilidad con tests.
 func (h *Handler) Discard(w http.ResponseWriter, r *http.Request) {
 	p := auth.MustPrincipal(r.Context())
 	if err := h.svc.Discard(r.Context(), p.UserID, r.PathValue("id")); err != nil {
@@ -82,6 +88,8 @@ func (h *Handler) Discard(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusNoContent)
 }
 
+// Deprecated: usar recommendation.Handler.Inquire
+// (POST /recommendations/{id}/inquire). Se conserva por compatibilidad con tests.
 func (h *Handler) Inquire(w http.ResponseWriter, r *http.Request) {
 	p := auth.MustPrincipal(r.Context())
 	var body struct {

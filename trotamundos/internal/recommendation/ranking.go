@@ -14,6 +14,12 @@ func affinityKey(destination, recType string) string {
 	return strings.ToLower(strings.TrimSpace(destination)) + "|" + strings.ToLower(strings.TrimSpace(recType))
 }
 
+// profileAffinityKey agrega afinidades por destino y perfil anonimizado, tal
+// como describe la Iteración 5 del ADD. El bucket es seudónimo, nunca el user_id.
+func profileAffinityKey(bucket, destination, recType string) string {
+	return bucket + "|" + affinityKey(destination, recType)
+}
+
 func TrainModel(signals []domain.AnonymizedSignal, now time.Time) domain.ModelSnapshot {
 	affinities := map[string]float64{}
 	for _, signal := range signals {
@@ -32,6 +38,10 @@ func TrainModel(signals []domain.AnonymizedSignal, now time.Time) domain.ModelSn
 		}
 		affinities[affinityKey(destination, signal.RecommendationType)] += weight
 		affinities[affinityKey(destination, "*")] += weight * 0.4
+		if bucket := strings.TrimSpace(signal.UserBucket); bucket != "" {
+			affinities[profileAffinityKey(bucket, destination, signal.RecommendationType)] += weight
+			affinities[profileAffinityKey(bucket, destination, "*")] += weight * 0.4
+		}
 	}
 	return domain.ModelSnapshot{
 		Version:    idgen.UUID(),
@@ -54,7 +64,7 @@ func FromCatalog(items []domain.AgencyCatalogItem) []domain.Recommendation {
 	return out
 }
 
-func Rank(candidates []domain.Recommendation, model domain.ModelSnapshot, prefs *domain.RecommendationPreferences, history []domain.Trip, discarded, interested map[string]bool) []domain.Recommendation {
+func Rank(candidates []domain.Recommendation, model domain.ModelSnapshot, prefs *domain.RecommendationPreferences, history []domain.Trip, profileBucket string, discarded, interested map[string]bool) []domain.Recommendation {
 	destinations, types := historyAffinities(history)
 	out := make([]domain.Recommendation, 0, len(candidates))
 	for _, candidate := range candidates {
@@ -70,7 +80,21 @@ func Rank(candidates []domain.Recommendation, model domain.ModelSnapshot, prefs 
 		}
 		score := 1.0
 		reasons := []string{}
-		if value, ok := model.Affinities[affinityKey(candidate.Destination, recType)]; ok {
+		if profileBucket != "" {
+			if value, ok := model.Affinities[profileAffinityKey(profileBucket, candidate.Destination, recType)]; ok {
+				score += clamp(value, -2, 4) * 0.5
+				reasons = append(reasons, "afinidad por perfil")
+			} else if value, ok := model.Affinities[profileAffinityKey(profileBucket, candidate.Destination, "*")]; ok {
+				score += clamp(value, -2, 4) * 0.3
+				reasons = append(reasons, "afinidad de destino del perfil")
+			} else if value, ok := model.Affinities[affinityKey(candidate.Destination, recType)]; ok {
+				score += clamp(value, -2, 4) * 0.5
+				reasons = append(reasons, "afinidad global")
+			} else if value, ok := model.Affinities[affinityKey(candidate.Destination, "*")]; ok {
+				score += clamp(value, -2, 4) * 0.3
+				reasons = append(reasons, "afinidad de destino")
+			}
+		} else if value, ok := model.Affinities[affinityKey(candidate.Destination, recType)]; ok {
 			score += clamp(value, -2, 4) * 0.5
 			reasons = append(reasons, "afinidad global")
 		} else if value, ok := model.Affinities[affinityKey(candidate.Destination, "*")]; ok {

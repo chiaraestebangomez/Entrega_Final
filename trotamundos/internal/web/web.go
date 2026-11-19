@@ -2,6 +2,7 @@ package web
 
 import (
 	"embed"
+	"encoding/json"
 	"io/fs"
 	"net/http"
 )
@@ -22,6 +23,20 @@ func Assets() http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Cache-Control", "no-cache")
 		server.ServeHTTP(w, r)
+	})
+}
+
+// Config expone al navegador los datos no secretos que la SPA necesita para
+// llamar a la API. La API Key es un identificador de cuota (CON-01), no una
+// credencial de usuario: el acceso real sigue exigiendo JWT.
+func Config(apiKey string) http.Handler {
+	payload, _ := json.Marshal(map[string]string{"apiKey": apiKey})
+	script := append([]byte("window.TROTAMUNDOS_CONFIG="), payload...)
+	script = append(script, ';')
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/javascript; charset=utf-8")
+		w.Header().Set("Cache-Control", "no-store")
+		_, _ = w.Write(script)
 	})
 }
 

@@ -8,24 +8,26 @@ import (
 )
 
 func ShouldProcess(whitelist []domain.WhitelistEntry, filters []domain.MailFilter, msg mailer.Message) bool {
-	if len(whitelist) > 0 {
-		allowed := false
-		for _, w := range whitelist {
-			if SenderMatches(w.Pattern, msg.From) {
-				allowed = true
-				break
-			}
+	// Los patrones vacíos se ignoran: no pueden bloquear todos los correos.
+	patterns := 0
+	allowed := false
+	for _, w := range whitelist {
+		if strings.TrimSpace(w.Pattern) == "" {
+			continue
 		}
-		if !allowed {
-			return false
+		patterns++
+		if SenderMatches(w.Pattern, msg.From) {
+			allowed = true
+			break
 		}
 	}
-	active := 0
+	if patterns > 0 && !allowed {
+		return false
+	}
 	for _, f := range filters {
 		if !f.Active {
 			continue
 		}
-		active++
 		if !FilterMatches(f, msg) {
 			return false
 		}
@@ -60,9 +62,18 @@ func SenderMatches(pattern, sender string) bool {
 	return domain == p || strings.HasSuffix(domain, "."+p)
 }
 
+// FilterMatches devuelve true (match neutral) para filtros inválidos o
+// inactivos: un campo desconocido o un patrón vacío no debe descartar correos.
 func FilterMatches(f domain.MailFilter, msg mailer.Message) bool {
+	if !f.Active {
+		return true
+	}
+	want := strings.TrimSpace(f.Value)
+	if want == "" {
+		return true
+	}
 	var value string
-	switch strings.ToLower(f.Field) {
+	switch strings.ToLower(strings.TrimSpace(f.Field)) {
 	case "sender":
 		value = msg.From
 	case "subject":
@@ -70,11 +81,11 @@ func FilterMatches(f domain.MailFilter, msg mailer.Message) bool {
 	case "body":
 		value = msg.Body
 	default:
-		return false
+		return true
 	}
 	value = strings.ToLower(value)
-	want := strings.ToLower(f.Value)
-	switch strings.ToLower(f.Operator) {
+	want = strings.ToLower(want)
+	switch strings.ToLower(strings.TrimSpace(f.Operator)) {
 	case "contains":
 		return strings.Contains(value, want)
 	case "not_contains":
@@ -84,6 +95,6 @@ func FilterMatches(f domain.MailFilter, msg mailer.Message) bool {
 	case "starts_with":
 		return strings.HasPrefix(value, want)
 	default:
-		return false
+		return true
 	}
 }

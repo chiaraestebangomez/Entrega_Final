@@ -143,13 +143,16 @@ func (s *Service) Recommendations(ctx context.Context, userID string) ([]domain.
 	}
 	var snapshot domain.ModelSnapshot
 	var pool domain.CandidatePool
+	var havePool bool
 	if err := s.cache.Get(ctx, snapshotKey, &snapshot); err != nil {
 		s.degrade(ctx, "snapshot", err)
-		return []domain.Recommendation{}, nil
+		// Cold start: sin modelo entrenado se rankea con pesos neutros.
+		snapshot = domain.ModelSnapshot{Affinities: map[string]float64{}}
 	}
 	if err := s.cache.Get(ctx, poolKey, &pool); err != nil {
 		s.degrade(ctx, "pool", err)
-		return []domain.Recommendation{}, nil
+	} else {
+		havePool = true
 	}
 	prefs, err := s.store.GetPreferences(ctx, userID)
 	if err != nil {
@@ -167,17 +170,39 @@ func (s *Service) Recommendations(ctx context.Context, userID string) ([]domain.
 	if err != nil {
 		return nil, err
 	}
-	candidates := make([]domain.Recommendation, 0, len(pool.Candidates))
-	for _, rec := range pool.Candidates {
-		if rec.AgencyID == fav.AgencyID {
-			candidates = append(candidates, rec)
+	var candidates []domain.Recommendation
+	if havePool {
+		candidates = make([]domain.Recommendation, 0, len(pool.Candidates))
+		for _, rec := range pool.Candidates {
+			if rec.AgencyID == fav.AgencyID {
+				candidates = append(candidates, rec)
+			}
 		}
+	} else {
+		// Cold start: reconstruimos el catálogo de la agencia favorita en lugar
+		// de devolver una lista vacía mientras corre el primer batch.
+		candidates = s.coldStartCandidates(ctx, fav.AgencyID)
 	}
-	ranked := Rank(candidates, snapshot, prefs, trips, discarded, interested)
+	ranked := Rank(candidates, snapshot, prefs, trips, userBucket(userID), discarded, interested)
 	if err := s.cache.Set(ctx, key, ranked, s.opts.ResultTTL); err != nil {
 		s.log.Warn("no se pudo cachear recomendaciones", "error", err)
 	}
 	return ranked, nil
+}
+
+// coldStartCandidates obtiene las recomendaciones directamente del adaptador de
+// la agencia favorita cuando todavía no corrió el batch que publica el pool.
+func (s *Service) coldStartCandidates(ctx context.Context, agencyID string) []domain.Recommendation {
+	adapter := s.providers.Agency(agencyID)
+	if adapter == nil {
+		return []domain.Recommendation{}
+	}
+	catalog, err := adapter.Catalog(ctx, agencyID)
+	if err != nil {
+		s.log.Warn("cold start: catálogo de agencia no disponible", "agency_id", agencyID, "error", err)
+		return []domain.Recommendation{}
+	}
+	return FromCatalog(catalog.Items)
 }
 
 func (s *Service) Feedback(ctx context.Context, userID, recommendationID string, input domain.RecommendationFeedback) (*domain.FeedbackResult, error) {
@@ -190,6 +215,21 @@ func (s *Service) Feedback(ctx context.Context, userID, recommendationID string,
 	rec, err := s.agencies.GetRecommendation(ctx, recommendationID)
 	if err != nil {
 		return nil, err
+	}
+	if rec == nil {
+		return nil, domain.ErrNotFound
+	}
+	// Misma validación que agencies.Service.assertRecommendation: la
+	// recomendación debe pertenecer a la agencia favorita del usuario.
+	fav, err := s.agencies.Favorite(ctx, userID)
+	if errors.Is(err, domain.ErrNotFound) {
+		return nil, domain.ErrForbidden
+	}
+	if err != nil {
+		return nil, err
+	}
+	if fav == nil || fav.AgencyID != rec.AgencyID {
+		return nil, domain.ErrForbidden
 	}
 	var adjustments any
 	if action == domain.FeedbackAdjust {
@@ -228,11 +268,33 @@ func (s *Service) Feedback(ctx context.Context, userID, recommendationID string,
 	return &domain.FeedbackResult{SignalID: signalID, Recommendations: recs}, nil
 }
 
+// recordInquirySignal registra la consulta como señal anonimizada para que el
+// modelo batch la tenga en cuenta, igual que el resto del feedback.
+func (s *Service) recordInquirySignal(ctx context.Context, userID, recommendationID string) {
+	rec, err := s.agencies.GetRecommendation(ctx, recommendationID)
+	if err != nil || rec == nil {
+		if err != nil {
+			s.log.Warn("no se pudo resolver la recomendación consultada", "error", err)
+		}
+		return
+	}
+	signal := domain.AnonymizedSignal{
+		ID: idgen.UUID(), UserBucket: userBucket(userID), Destination: rec.Destination,
+		RecommendationType: rec.Type, Action: domain.FeedbackInquiry, PriceBucket: priceBucket(rec.PriceCents),
+		CreatedAt: s.now().UTC(),
+	}
+	if err := s.store.WriteAnonymizedSignals(ctx, []domain.AnonymizedSignal{signal}); err != nil {
+		s.log.Warn("no se pudo registrar la señal de consulta", "error", err)
+	}
+	s.invalidate(ctx, userID)
+}
+
 func (s *Service) InfoRequest(ctx context.Context, userID, recommendationID, message string) (*domain.AgencyRequest, error) {
 	req, err := s.agencies.Inquire(ctx, userID, recommendationID, message)
 	if err != nil {
 		return nil, err
 	}
+	s.recordInquirySignal(ctx, userID, recommendationID)
 	s.deliver(ctx, req)
 	return req, nil
 }
@@ -252,6 +314,9 @@ func (s *Service) CreateAgencyRequest(ctx context.Context, userID, recommendatio
 	}
 	if err != nil {
 		return nil, err
+	}
+	if hasRec {
+		s.recordInquirySignal(ctx, userID, recommendationID)
 	}
 	s.deliver(ctx, req)
 	return req, nil
@@ -356,7 +421,46 @@ func (s *Service) deliver(ctx context.Context, req *domain.AgencyRequest) {
 }
 
 func (s *Service) invalidate(ctx context.Context, userID string) {
-	_ = s.cache.Delete(ctx, s.resultKey(ctx, userID), resultPrefix+userID)
+	// Borramos la clave vigente, la clave histórica sin versión y, si el cache
+	// sabe enumerar, cualquier versión intermedia (reco:result:<version>:<userID>).
+	keys := []string{s.resultKey(ctx, userID), resultPrefix + userID}
+	if lister, ok := s.cache.(KeyLister); ok {
+		matched, err := lister.Keys(ctx, resultPrefix+"*")
+		if err != nil {
+			s.log.Warn("no se pudieron enumerar las claves de resultados", "error", err)
+		} else {
+			for _, key := range matched {
+				if key == resultPrefix+userID || strings.HasSuffix(key, ":"+userID) {
+					keys = append(keys, key)
+				}
+			}
+		}
+	}
+	if deleter, ok := s.cache.(PatternDeleter); ok {
+		pattern := resultPrefix + "*" + escapeGlob(userID)
+		if _, err := deleter.DeletePattern(ctx, pattern); err != nil {
+			s.log.Warn("no se pudieron borrar las claves de resultados por patrón", "pattern", pattern, "error", err)
+		}
+	}
+
+	unique := make([]string, 0, len(keys))
+	seen := map[string]bool{}
+	for _, key := range keys {
+		if key == "" || seen[key] {
+			continue
+		}
+		seen[key] = true
+		unique = append(unique, key)
+	}
+	if err := s.cache.Delete(ctx, unique...); err != nil {
+		s.log.Warn("no se pudo invalidar la caché de recomendaciones", "error", err)
+	}
+}
+
+// escapeGlob mantiene el userID literal dentro de un patrón MATCH de Redis o
+// path.Match, para que un ID con metacaracteres no invalide otras cuentas.
+func escapeGlob(value string) string {
+	return strings.NewReplacer(`\`, `\\`, `*`, `\*`, `?`, `\?`, `[`, `\[`, `]`, `\]`).Replace(value)
 }
 
 func (s *Service) resultKey(ctx context.Context, userID string) string {

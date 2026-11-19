@@ -31,7 +31,10 @@ services:
   api:
     build: .
     environment:
-      APP_ENV: production
+      # Perfil de prototipo. Para producción, APP_ENV=production exige secretos
+      # explícitos (TOKEN_ENCRYPTION_KEY, MOCK_CONTROL_KEY, WEBHOOK_KEY, API_KEYS)
+      # y un CORS_ALLOWED_ORIGIN concreto; ver .env.example.
+      APP_ENV: development
       HTTP_ADDR: ":8080"
       DATABASE_URL: postgres://trotamundos:trotamundos@postgres:5432/trotamundos?sslmode=disable
       OLAP_DATABASE_URL: postgres://trotamundos:trotamundos@postgres:5432/trotamundos?sslmode=disable

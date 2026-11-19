@@ -103,10 +103,18 @@ func OpenReadOnly(ctx context.Context, dsn string, maxConns int32) (*pgxpool.Poo
 }
 
 func MigratePool(ctx context.Context, pool *pgxpool.Pool) error {
-	if _, err := pool.Exec(ctx, `CREATE SCHEMA IF NOT EXISTS platform`); err != nil {
+	tx, err := pool.Begin(ctx)
+	if err != nil {
 		return err
 	}
-	if _, err := pool.Exec(ctx, `CREATE TABLE IF NOT EXISTS platform.schema_migrations (version text PRIMARY KEY, applied_at timestamptz NOT NULL DEFAULT now())`); err != nil {
+	defer func() { _ = tx.Rollback(ctx) }()
+	if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtext('trotamundos_migrations'))`); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(ctx, `CREATE SCHEMA IF NOT EXISTS platform`); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(ctx, `CREATE TABLE IF NOT EXISTS platform.schema_migrations (version text PRIMARY KEY, applied_at timestamptz NOT NULL DEFAULT now())`); err != nil {
 		return err
 	}
 	entries, err := fs.ReadDir(migrations, "migrations")
@@ -122,7 +130,7 @@ func MigratePool(ctx context.Context, pool *pgxpool.Pool) error {
 	sort.Strings(names)
 	for _, name := range names {
 		var applied bool
-		if err := pool.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM platform.schema_migrations WHERE version=$1)`, name).Scan(&applied); err != nil {
+		if err := tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM platform.schema_migrations WHERE version=$1)`, name).Scan(&applied); err != nil {
 			return err
 		}
 		if applied {
@@ -133,15 +141,15 @@ func MigratePool(ctx context.Context, pool *pgxpool.Pool) error {
 			return err
 		}
 		for _, stmt := range splitStatements(string(body)) {
-			if _, err := pool.Exec(ctx, stmt); err != nil {
+			if _, err := tx.Exec(ctx, stmt); err != nil {
 				return fmt.Errorf("migration %s: %w", name, err)
 			}
 		}
-		if _, err := pool.Exec(ctx, `INSERT INTO platform.schema_migrations(version) VALUES($1)`, name); err != nil {
+		if _, err := tx.Exec(ctx, `INSERT INTO platform.schema_migrations(version) VALUES($1)`, name); err != nil {
 			return err
 		}
 	}
-	return nil
+	return tx.Commit(ctx)
 }
 
 func splitStatements(sql string) []string {

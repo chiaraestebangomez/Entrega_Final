@@ -2,8 +2,10 @@ package itinerary
 
 import (
 	"errors"
+	"fmt"
 	"net/http"
 	"strconv"
+	"strings"
 
 	"trotamundos/internal/auth"
 	"trotamundos/internal/domain"
@@ -50,7 +52,10 @@ func (h *Handler) DeleteTrip(w http.ResponseWriter, r *http.Request) {
 		writeError(w, err)
 		return
 	}
-	h.svc.RecordAudit(r.Context(), p.UserID, "trip.delete", "trip", r.PathValue("id"), httpx.ClientIP(r), nil)
+	if err := h.svc.RecordAudit(r.Context(), p.UserID, "trip.delete", "trip", r.PathValue("id"), httpx.ClientIP(r), nil); err != nil {
+		writeError(w, err)
+		return
+	}
 	w.WriteHeader(http.StatusNoContent)
 }
 
@@ -69,7 +74,10 @@ func (h *Handler) CreateReservation(w http.ResponseWriter, r *http.Request) {
 		writeError(w, err)
 		return
 	}
-	h.svc.RecordAudit(r.Context(), p.UserID, "reservation.create", "reservation", res.ID, httpx.ClientIP(r), nil)
+	if err := h.svc.RecordAudit(r.Context(), p.UserID, "reservation.create", "reservation", res.ID, httpx.ClientIP(r), nil); err != nil {
+		writeError(w, err)
+		return
+	}
 	httpx.JSON(w, http.StatusCreated, res)
 }
 
@@ -80,7 +88,11 @@ func (h *Handler) GetReservation(w http.ResponseWriter, r *http.Request) {
 		writeError(w, err)
 		return
 	}
-	changes, _ := h.svc.ListChanges(r.Context(), p.UserID, res.ID)
+	changes, err := h.svc.ListChanges(r.Context(), p.UserID, res.ID)
+	if err != nil {
+		writeError(w, err)
+		return
+	}
 	res.Changes = changes
 	httpx.JSON(w, http.StatusOK, res)
 }
@@ -97,7 +109,10 @@ func (h *Handler) UpdateReservation(w http.ResponseWriter, r *http.Request) {
 		writeError(w, err)
 		return
 	}
-	h.svc.RecordAudit(r.Context(), p.UserID, "reservation.update", "reservation", res.ID, httpx.ClientIP(r), nil)
+	if err := h.svc.RecordAudit(r.Context(), p.UserID, "reservation.update", "reservation", res.ID, httpx.ClientIP(r), nil); err != nil {
+		writeError(w, err)
+		return
+	}
 	httpx.JSON(w, http.StatusOK, res)
 }
 
@@ -109,7 +124,10 @@ func (h *Handler) DeleteReservation(w http.ResponseWriter, r *http.Request) {
 		writeError(w, err)
 		return
 	}
-	h.svc.RecordAudit(r.Context(), p.UserID, "reservation.delete", "reservation", id, httpx.ClientIP(r), nil)
+	if err := h.svc.RecordAudit(r.Context(), p.UserID, "reservation.delete", "reservation", id, httpx.ClientIP(r), nil); err != nil {
+		writeError(w, err)
+		return
+	}
 	w.WriteHeader(http.StatusNoContent)
 }
 
@@ -117,6 +135,18 @@ func (h *Handler) SyncReservation(w http.ResponseWriter, r *http.Request) {
 	p := mustPrincipal(r)
 	res, err := h.svc.SyncReservation(r.Context(), p.UserID, r.PathValue("id"))
 	if err != nil {
+		var syncErr *SyncError
+		if errors.As(err, &syncErr) && syncErr.Reservation != nil {
+			// No es un 200: la sincronización falló. Se incluye el estado stale
+			// persistido para que el cliente pueda distinguirlo de una sync exitosa.
+			httpx.JSON(w, http.StatusBadGateway, map[string]any{
+				"error":       map[string]string{"code": "provider_sync_failed", "message": err.Error()},
+				"status":      "stale",
+				"stale":       syncErr.Reservation.Stale,
+				"reservation": syncErr.Reservation,
+			})
+			return
+		}
 		writeError(w, err)
 		return
 	}
@@ -135,12 +165,36 @@ func (h *Handler) ListChanges(w http.ResponseWriter, r *http.Request) {
 
 func (h *Handler) ListNotifications(w http.ResponseWriter, r *http.Request) {
 	p := mustPrincipal(r)
-	out, err := h.svc.ListNotifications(r.Context(), p.UserID, 50)
+	limit, offset, err := paginationParams(r, 50, 0)
+	if err != nil {
+		httpx.Error(w, http.StatusBadRequest, "invalid_pagination", err.Error())
+		return
+	}
+	out, err := h.svc.ListNotificationsPage(r.Context(), p.UserID, limit, offset)
 	if err != nil {
 		writeError(w, err)
 		return
 	}
 	httpx.JSON(w, http.StatusOK, map[string]any{"data": out})
+}
+
+func paginationParams(r *http.Request, defaultLimit, defaultOffset int) (int, int, error) {
+	limit, offset := defaultLimit, defaultOffset
+	if v := strings.TrimSpace(r.URL.Query().Get("limit")); v != "" {
+		n, err := strconv.Atoi(v)
+		if err != nil || n <= 0 || n > 200 {
+			return 0, 0, fmt.Errorf("parámetro 'limit' inválido (1..200)")
+		}
+		limit = n
+	}
+	if v := strings.TrimSpace(r.URL.Query().Get("offset")); v != "" {
+		n, err := strconv.Atoi(v)
+		if err != nil || n < 0 {
+			return 0, 0, fmt.Errorf("parámetro 'offset' inválido (debe ser >= 0)")
+		}
+		offset = n
+	}
+	return limit, offset, nil
 }
 
 func (h *Handler) MarkNotificationRead(w http.ResponseWriter, r *http.Request) {
