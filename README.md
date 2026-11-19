@@ -28,38 +28,54 @@ La SPA se sirve desde la misma API y se empaqueta con `go:embed` desde `internal
 ---
 
 
-**Requisitos:** Go 1.22, PostgreSQL 16 y Redis 7.
+## Ejecución
+
+Todos los comandos se ejecutan desde `trotamundos/` (donde están el `Makefile`, el `Dockerfile` y `docker-compose.yml`, no en la raíz del repositorio).
+
+### Opción A: Docker (recomendada)
+
+Requisito: Docker con Compose v2. No hace falta instalar Go, PostgreSQL ni Redis.
 
 ```bash
+git clone https://github.com/chiaraestebangomez/Entrega_Final.git
+cd Entrega_Final/trotamundos
+make up
+curl http://localhost:8080/readyz
+```
+
+`make up` ejecuta `docker compose up --build -d --wait --wait-timeout 60`: levanta PostgreSQL 16, Redis 7 y la API, y espera a que los health checks estén OK antes de devolver el control. Si se usa `docker compose up --build -d` directamente, el `curl` inmediato puede fallar porque la API todavía no está lista.
+
+Abra `http://localhost:8080` para usar la aplicación. Para detener todo: `make down` (o `make clean`, que también borra los volúmenes).
+
+### Opción B: API en local con Go
+
+Requisitos: Go 1.22, PostgreSQL 16 y Redis 7. Las dependencias se pueden levantar con Docker Compose:
+
+```bash
+cd Entrega_Final/trotamundos
+docker compose up -d postgres redis
 cp .env.example .env
 set -a && source .env && set +a
 go mod download
 go run ./cmd/api
 ```
 
-Las migraciones y semillas se aplican automáticamente al iniciar. Las claves RSA se generan en `keys/` si no existen.
+La API no lee `.env` por sí sola: hay que exportar las variables en la misma terminal con `source`. El `DATABASE_URL` de `.env.example` apunta a `localhost:5432` y `REDIS_ADDR` a `localhost:6379`, los puertos que publica el compose. En lugar de `go run ./cmd/api` también se puede usar `make run`.
 
----
+Las migraciones y semillas se aplican automáticamente al iniciar (el usuario analista se crea si `SEED_ANALYST_EMAIL`/`SEED_ANALYST_PASSWORD` están definidos). Las claves RSA se generan en `keys/` si no existen.
 
-## Iniciar el sistema
+### Verificación
 
 ```bash
-git clone https://github.com/chiaraestebangomez/Entrega_Final
-cd Entrega_Final
-cd trotamundos
-docker compose up --build -d
-curl http://localhost:8080/readyz
+make test       # pruebas unitarias (go test ./...)
+make smoke      # prueba de humo contra http://localhost:8080 (requiere la API levantada)
+make test-e2e   # ciclo completo: limpia, levanta, prueba y borra contenedores y volúmenes
 ```
 
-Abra `http://localhost:8080` para usar la aplicación.
+`make test-e2e` deja todo apagado al terminar; para seguir usando la aplicación, ejecute `make up` nuevamente.
 
 **Usuario analista sembrado por defecto:**
 `analyst@trotamundos.dev` / `analyst12345`
-
-**Prueba de humo de extremo a extremo:**
-```bash
-make test-e2e
-```
 
 **Cobertura funcional incluida:** analizador de correos, filtros, agrupación por destino/fechas, autenticación con rotación de refresco, JWT, cifrado AES-GCM, proveedores simulados, analítica anonimizada, social, compartición y entrega de la SPA con sus activos.
 
