@@ -238,7 +238,9 @@ func (r *PostgresRepository) ClaimEvents(ctx context.Context, limit int) ([]doma
 }
 
 func (r *PostgresRepository) MarkProcessed(ctx context.Context, id, status string, at time.Time) error {
-	_, err := r.pool.Exec(ctx, `UPDATE itinerary.ingestion_events SET status=$2, processed_at=$3, last_error='' WHERE id=$1`, id, status, at)
+	// CON-05: una vez procesado (o ignorado) el evento no conserva ningún
+	// contenido del correo; los datos útiles ya están en la reserva creada.
+	_, err := r.pool.Exec(ctx, `UPDATE itinerary.ingestion_events SET status=$2, processed_at=$3, last_error='', payload='{}'::jsonb WHERE id=$1`, id, status, at)
 	return err
 }
 

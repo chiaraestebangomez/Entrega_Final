@@ -223,8 +223,27 @@ func (s *Service) Notify(eventID string) {
 func (s *Service) Queue() <-chan string { return s.queue }
 
 func (s *Service) enqueue(ctx context.Context, acc *domain.MailAccount, channel string, msg mailer.Message) (*domain.IngestionEvent, bool, error) {
+	// CON-05 / QA-14: el outbox no almacena el contenido completo del correo.
+	// En la recepción evaluamos filtros y extraemos los campos canónicos; el
+	// worker sólo persiste esos datos ya normalizados. Los eventos antiguos con
+	// "body" en el payload siguen procesándose por la ruta de compatibilidad.
+	whitelist, err := s.repo.ListWhitelist(ctx, acc.UserID)
+	if err != nil {
+		return nil, false, err
+	}
+	filters, err := s.repo.ListFilters(ctx, acc.UserID)
+	if err != nil {
+		return nil, false, err
+	}
 	payload := map[string]any{
-		"from": msg.From, "subject": msg.Subject, "body": msg.Body, "received_at": msg.ReceivedAt,
+		"from": msg.From, "subject": msg.Subject, "received_at": msg.ReceivedAt,
+		"accepted": ShouldProcess(whitelist, filters, msg),
+	}
+	parsed, parseErr := ParseMessage(msg)
+	if errors.Is(parseErr, ErrUnparseable) {
+		payload["unparseable"] = true
+	} else if parseErr == nil {
+		payload["parsed"] = parsedPayload(parsed)
 	}
 	ev := &domain.IngestionEvent{
 		ID: idgen.UUID(), UserID: acc.UserID, MailboxID: acc.ID, Channel: channel,
@@ -293,7 +312,82 @@ func messageFromPayload(payload map[string]any) mailer.Message {
 	return msg
 }
 
+// parsedPayload guarda sólo los campos canónicos extraídos del correo. Nunca
+// incluye el cuerpo completo ni detalles cuyo nombre sugiera contenerlo.
+func parsedPayload(p ParsedReservation) map[string]any {
+	out := map[string]any{
+		"type": p.Type, "provider": p.Provider, "locator": p.Locator,
+		"title": p.Title, "destination": p.Destination, "details": sanitizeDetails(p.Details),
+	}
+	if p.StartAt != nil {
+		out["start_at"] = p.StartAt.Format(time.RFC3339)
+	}
+	if p.EndAt != nil {
+		out["end_at"] = p.EndAt.Format(time.RFC3339)
+	}
+	return out
+}
+
+func sanitizeDetails(details map[string]any) map[string]any {
+	out := map[string]any{}
+	for k, v := range details {
+		lower := strings.ToLower(k)
+		if strings.Contains(lower, "body") || strings.Contains(lower, "message") ||
+			strings.Contains(lower, "mensaje") || strings.Contains(lower, "contenido") {
+			continue
+		}
+		if text, ok := v.(string); ok && len(text) > 200 {
+			v = text[:200]
+		}
+		out[k] = v
+	}
+	return out
+}
+
+func parsedFromPayload(raw map[string]any) ParsedReservation {
+	get := func(k string) string {
+		if v, ok := raw[k].(string); ok {
+			return v
+		}
+		return ""
+	}
+	p := ParsedReservation{
+		Type: get("type"), Provider: get("provider"), Locator: get("locator"),
+		Title: get("title"), Destination: get("destination"),
+		StartAt: parseDate(get("start_at")), EndAt: parseDate(get("end_at")),
+		Details: map[string]any{},
+	}
+	if details, ok := raw["details"].(map[string]any); ok {
+		p.Details = details
+	}
+	return p
+}
+
+func (s *Service) processCanonical(ctx context.Context, ev domain.IngestionEvent, raw map[string]any) error {
+	p := parsedFromPayload(raw)
+	in := itinerary.ReservationInput{
+		Type: p.Type, Provider: p.Provider, ProviderLocator: p.Locator,
+		Title: p.Title, Destination: p.Destination, StartAt: p.StartAt,
+		EndAt: p.EndAt, Status: domain.ReservationConfirmed, Details: p.Details,
+	}
+	if _, _, err := s.applier.ApplyReservation(ctx, ev.UserID, in, domain.SourceEmail, "email:"+ev.MessageID); err != nil {
+		return err
+	}
+	return s.repo.MarkProcessed(ctx, ev.ID, domain.EventProcessed, s.now().UTC())
+}
+
 func (s *Service) ProcessEvent(ctx context.Context, ev domain.IngestionEvent) error {
+	if accepted, ok := ev.Payload["accepted"].(bool); ok && !accepted {
+		return s.repo.MarkProcessed(ctx, ev.ID, domain.EventIgnored, s.now().UTC())
+	}
+	if unparseable, _ := ev.Payload["unparseable"].(bool); unparseable {
+		return s.repo.MarkProcessed(ctx, ev.ID, domain.EventIgnored, s.now().UTC())
+	}
+	if raw, ok := ev.Payload["parsed"].(map[string]any); ok {
+		return s.processCanonical(ctx, ev, raw)
+	}
+	// Compatibilidad con eventos persistidos antes de este cambio: aún pueden
+	// traer el cuerpo en el payload, pero no se vuelve a almacenar.
 	msg := messageFromPayload(ev.Payload)
 	if ev.MessageID != "" {
 		msg.ID = ev.MessageID

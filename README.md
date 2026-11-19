@@ -62,7 +62,7 @@ make run                              # go run ./cmd/api
 
 - Go 1.22, monolito modular con `net/http` y patrones de rutas de Go 1.22 (sin framework HTTP).
 - PostgreSQL 16 con esquemas `auth`, `itinerary` y `analytics`; Redis 7 para refresco, revocación y rate limiting.
-- Adaptadores de proveedores y correo simulados, con reintentos y circuit breaker; no se hacen llamadas externas reales.
+- Adaptadores de proveedores simulados (con reintentos y circuit breaker) y conector de correo simulado; no se hacen llamadas externas reales.
 - Docker multietapa + Docker Compose.
 
 ```text
@@ -87,11 +87,11 @@ scripts/smoke.sh         prueba de humo end-to-end
 Decisiones que conviene conocer:
 
 - **Agrupación:** mismo destino (comparación tolerante) y ventana de ±3 días; se elige el viaje más cercano.
-- **Precedencia de datos:** proveedor > correo > manual al fusionar reservas.
+- **Precedencia de datos:** proveedor > manual > correo al fusionar reservas.
 - **Idempotencia:** deduplicación por `(user_id, provider, provider_locator)` y por `(user_id, message_id)` en ingesta.
 - **Asincronía:** outbox en PostgreSQL consumido con `FOR UPDATE SKIP LOCKED`, reintentos exponenciales y recuperación de eventos trabados.
 - **Analítica:** los hechos se publican sin `user_id`, correo ni localizadores; la lectura usa un pool de solo lectura.
-- **Revocación:** el logout de la SPA envía el bearer para revocar el `jti`; si el access expiró, se refresca antes de reintentar.
+- **Revocación:** el logout de la SPA envía el bearer para revocar el `jti` cuando el access sigue vigente; si expiró, el servidor lo ignora y no se refresca, pero el refresh token sí se revoca.
 - **Fragmentación:** `pgxdb.Shards` y `DATABASE_SHARDS` dejan preparada la selección de pool por `user_id`, pero ningún repositorio la usa todavía: el prototipo opera con un shard.
 
 ## Configuración
@@ -134,13 +134,13 @@ Con `APP_ENV=production` la carga falla si no se definen `TOKEN_ENCRYPTION_KEY`,
 
 Especificaciones: [`api/openapi.yaml`](trotamundos/api/openapi.yaml) y [`api/asyncapi.yaml`](trotamundos/api/asyncapi.yaml). Los tests validan que ambas parsean y que OpenAPI coincide con las rutas del router. Salvo las rutas públicas, se requiere `Authorization: Bearer <token>`; el logout admite el bearer para revocar también el access token.
 
-- **Rutas públicas:** `GET /`, `GET /assets/...`, `GET /api-config.js` y los health checks.
+- **Rutas públicas:** `GET /`, `GET /assets/...`, `GET /api-config.js` y los health checks; también `/auth/*`, `/mock/*`, `/webhooks/mail` y `GET /social/networks` (estas últimas con `X-Mock-Key`/`X-Webhook-Key` según corresponda).
 - **Autenticación:** `POST /auth/register`, `POST /auth/login`, `POST /auth/refresh`, `POST /auth/logout`, `GET /auth/me`.
 - **Itinerario:** `GET /trips`, `GET|DELETE /trips/{id}`, `POST /trips/{id}/reservations`, `POST /reservations`, `GET|PATCH|DELETE /reservations/{id}`, `POST /reservations/{id}/sync`, `GET /reservations/{id}/changes`, notificaciones y `POST /trips/{id}/context-location`.
 - **Correo:** cuentas, eventos, listas blancas y filtros bajo `/mail/...`, más `POST /webhooks/mail` con `X-Webhook-Key`.
 - **Agencia:** `GET /agencies`, `GET|PUT|DELETE /me/favorite-agency`, `GET|PUT /me/preferences`, `GET /recommendations`, `POST /recommendations/{id}/feedback`, `POST /recommendations/{id}/info-request` y consultas a agencia. Hay alias compatibles bajo `/agencies/favorite`, `/discard` y `/inquire`.
 - **Compartición y social:** `/shares`, `/shared-with-me`, `/shared/{tripId}`, `GET /social/networks`, `POST /trips/{id}/social/preview` y `POST /trips/{id}/social/share`.
-- **Analítica** (rol `analyst` o `admin`): `GET /analytics/summary` y `GET /analytics/facts`, con `from` y `to` en formato `YYYY-MM-DD`.
+- **Analítica** (rol `analyst` o `admin`): `GET /analytics/summary` y `GET /analytics/facts`, con `from` y `to` en `YYYY-MM-DD` (también acepta RFC3339).
 
 ## Controles de simulación
 
